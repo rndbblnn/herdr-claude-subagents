@@ -2,6 +2,14 @@
 
 A Claude Code plugin that makes delegated agents visible in [Herdr](https://herdr.dev).
 
+> **Credit:** the spawner, hook, parser and skill are the work of
+> [assafcaf](https://github.com/assafcaf), from
+> [`herdr-claude-setup`](https://github.com/assafcaf/herdr-claude-setup) (MIT). This repo
+> repackages them as an installable Claude Code plugin. It changes the paths to
+> `${CLAUDE_PLUGIN_ROOT}`, adds the `CC_HERDR_ALLOWED_AGENTS` setting and a test script, and
+> drops the installer and the Windows status lines. Use upstream for a full machine setup,
+> and this plugin for `/plugin install`.
+
 ## The problem
 
 Claude Code's built-in subagents (the `Agent` tool) run **in-process**. They have no

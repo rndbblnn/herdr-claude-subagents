@@ -12,5 +12,8 @@
   `pane report-agent` needs a real pane id, and an in-process subagent has none.
 - **Test before release:** `./test.sh` (hook allow/block matrix + spawner `--dry-run`), then
   `claude plugin validate .`.
-- Upstream origin: developed in the author's `~/.claude`, where a private backup is kept.
-  This repo is now the source of truth.
+- **Upstream:** the code comes from github.com/assafcaf/herdr-claude-setup (MIT, by assafcaf).
+  Keep his copyright line in LICENSE. To pull in upstream fixes, diff against
+  `claude/{hooks,scripts,skills}` in a clone of that repo. Changes made here: paths use
+  `${CLAUDE_PLUGIN_ROOT}`, examples are generic, `CC_HERDR_ALLOWED_AGENTS` was added, and
+  `evidence-reviewer` was removed from the built-in allowlist.
