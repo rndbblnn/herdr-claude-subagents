@@ -1,0 +1,15 @@
+{
+  "name": "herdr-claude-subagents",
+  "owner": {
+    "name": "rndbblnn",
+    "url": "https://github.com/rndbblnn"
+  },
+  "plugins": [
+    {
+      "name": "herdr-claude-subagents",
+      "description": "Run Claude Code's delegated agents as real, named sessions in Herdr panes.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
