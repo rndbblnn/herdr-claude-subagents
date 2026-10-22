@@ -1,0 +1,411 @@
+#!/usr/bin/env bash
+# Spawn one named Claude session into a Herdr pane, inside this task's tab.
+#
+# Why this exists
+# ---------------
+# The Agent tool's subagents run *in-process* inside the calling session: no PTY, no child
+# process, no session id of their own. Herdr recognises agents by inspecting what occupies a
+# pane, so an in-process subagent is invisible to it and always will be — `pane report-agent`
+# needs a real pane_id, so not even a hook can conjure one without creating an empty pane
+# that displays nothing. Making a delegated agent visible therefore means spawning a real
+# `claude` process into a real pane. That is all this script does.
+#
+# The payoff is that one spawn produces three identities that already line up:
+#
+#   herdr agent name   `herdr agent prompt|read|wait|get <name>`   (pane control)
+#   Claude Code name   SendMessage({to: "<name>"})                 (agent-to-agent messages)
+#   session uuid       reported by `herdr agent list` as           (the join key between them)
+#                      .agents[].agent_session.value
+#
+# Verified on 2026-09-10: `herdr agent list` reported this repo's live sessions with
+# agent_session.value equal to each one's $CLAUDE_CODE_SESSION_ID. Herdr panes and Claude
+# Code peer sessions are one-to-one already; --name and --session-id only let us choose both
+# sides of the mapping up front instead of reading it back afterwards.
+#
+# Topology: one tab per task, one pane per agent. The tab is found by its label and created
+# on first use, so the second and later agents of a task land beside their siblings rather
+# than in a tab of their own. Closing the tab tears the whole team down.
+#
+# Usage
+#   herdr-spawn.sh <name> --task <slug> [options] [-- <claude args...>]
+#
+#   --task <slug>          tab label; the unit that groups one team           (required)
+#   --prompt <text>        submitted after the agent reports ready
+#   --orchestrator <name>  this session's Claude Code peer name, so the child can
+#                          SendMessage back; read it from ListAgents
+#   --cwd <path>           working directory for the pane        (default: $PWD)
+#   --trust                record --cwd as trusted before spawning, instead of refusing
+#                          to spawn into a directory Claude Code would stop and ask about
+#   --env KEY=VALUE        extra env for the pane; repeatable
+#   --wait                 block until the prompt settles (idle|done|blocked)
+#   --timeout <ms>         bound for --wait                      (default 300000)
+#   --dry-run              print the herdr commands, touch nothing
+#   --                     everything after is passed to `claude` verbatim
+#
+# Every spawned pane also receives:
+#   CC_TEAM_TASK, CC_TEAM_AGENT, CC_TEAM_ORCHESTRATOR, CC_TEAM_ORCHESTRATOR_PANE,
+#   CC_TEAM_ORCHESTRATOR_SESSION_AT_START
+#
+# Prints one JSON line describing the spawn.
+
+set -u
+
+SELF="herdr-spawn"
+die() { printf '%s: %s\n' "$SELF" "$1" >&2; exit 1; }
+
+# json_string_field lives with the hooks because that is what needed it first; jq is not
+# guaranteed to exist (see hooks/json-field.sh) and duplicating the parser here would
+# be worse than reaching across one directory for it.
+LIB="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../hooks" && pwd)/json-field.sh"
+[ -r "$LIB" ] || die "cannot read $LIB"
+# shellcheck source=../hooks/json-field.sh
+. "$LIB"
+
+# Numbers, which json_string_field cannot read: a pane rect is {"height":65,"width":121}.
+json_number_field() {
+  local key="$1" anchor="${2:-}"
+  awk -v key="$key" -v anchor="$anchor" '
+    { buf = buf $0 }
+    END {
+      s = buf
+      if (anchor != "") { i = index(buf, anchor); if (!i) exit 0; s = substr(buf, i) }
+      j = index(s, "\"" key "\"")
+      if (!j) exit 0
+      s = substr(s, j + length(key) + 2)
+      k = 1
+      while (k <= length(s) && substr(s, k, 1) ~ /[ \t\r\n:]/) k++
+      out = ""
+      while (k <= length(s) && substr(s, k, 1) ~ /[0-9.-]/) { out = out substr(s, k, 1); k++ }
+      printf "%s", out
+    }'
+}
+
+# Herdr returns arrays on one line. Records are only ever separated by `},{` — nested objects
+# such as "agent_session":{...} and "rect":{...} are followed by `},"`, never `},{` — so this
+# split is exact for these payloads.
+json_records() { sed 's/},{/}\n{/g'; }
+
+# A v4 uuid without depending on python or uuidgen, neither of which is guaranteed here.
+uuid4() {
+  local h
+  h=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
+  [ ${#h} -eq 32 ] || die "could not read 16 random bytes"
+  printf '%s-%s-4%s-a%s-%s\n' \
+    "${h:0:8}" "${h:8:4}" "${h:13:3}" "${h:17:3}" "${h:20:12}"
+}
+
+name=""
+task=""
+prompt=""
+orchestrator=""
+cwd="$PWD"
+trust=no
+wait_for_settle=no
+timeout_ms=300000
+dry_run=no
+envs=()
+claude_args=()
+
+[ $# -gt 0 ] || die "usage: $SELF <name> --task <slug> [options] [-- <claude args...>]"
+name="$1"; shift
+case "$name" in -*) die "first argument must be the agent name, got '$name'" ;; esac
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --task)         task="${2-}"; shift 2 ;;
+    --prompt)       prompt="${2-}"; shift 2 ;;
+    --orchestrator) orchestrator="${2-}"; shift 2 ;;
+    --cwd)          cwd="${2-}"; shift 2 ;;
+    --env)          envs+=("${2-}"); shift 2 ;;
+    --trust)        trust=yes; shift ;;
+    --timeout)      timeout_ms="${2-}"; shift 2 ;;
+    --wait)         wait_for_settle=yes; shift ;;
+    --dry-run)      dry_run=yes; shift ;;
+    --)             shift; claude_args=("$@"); break ;;
+    *)              die "unknown option '$1'" ;;
+  esac
+done
+
+# herdr.exe is a Windows binary; Git Bash's $PWD is a POSIX path it cannot resolve.
+if command -v cygpath >/dev/null 2>&1; then
+  cwd=$(cygpath -w "$cwd" 2>/dev/null || printf '%s' "$cwd")
+fi
+
+[ "${HERDR_ENV:-}" = 1 ] || die "not running inside a Herdr pane (HERDR_ENV is not 1)"
+[ -n "${HERDR_WORKSPACE_ID:-}" ] || die "HERDR_WORKSPACE_ID is unset"
+[ -n "$task" ] || die "--task <slug> is required; it is the tab label that groups the team"
+
+# Herdr's own constraint, enforced here so a bad name fails naming the rule, not the symptom.
+case "$name" in
+  [a-z]*) ;;
+  *) die "agent name must start with a lowercase letter: '$name'" ;;
+esac
+case "$name" in
+  *[!a-z0-9_-]*) die "agent name may only contain [a-z0-9_-]: '$name'" ;;
+esac
+[ ${#name} -le 32 ] || die "agent name must be at most 32 characters: '$name'"
+
+if herdr agent get "$name" >/dev/null 2>&1; then
+  die "an agent named '$name' is already live; names must be unique (herdr agent list)"
+fi
+
+run() {
+  if [ "$dry_run" = yes ]; then printf '+ %s\n' "$*" >&2; return 0; fi
+  "$@"
+}
+
+tab_id_for_label() {
+  herdr tab list --workspace "$HERDR_WORKSPACE_ID" \
+    | json_records \
+    | while IFS= read -r rec; do
+        [ "$(printf '%s' "$rec" | json_string_field label)" = "$1" ] || continue
+        printf '%s' "$rec" | json_string_field tab_id
+        printf '\n'
+      done | head -n 1
+}
+
+panes_in_tab() {
+  herdr pane list --workspace "$HERDR_WORKSPACE_ID" \
+    | json_records \
+    | while IFS= read -r rec; do
+        [ "$(printf '%s' "$rec" | json_string_field tab_id)" = "$1" ] || continue
+        printf '%s' "$rec" | json_string_field pane_id
+        printf '\n'
+      done
+}
+
+# Which pane to split, and which way. Always the largest by area, halved along its longer
+# axis — that is what turns N agents into a grid instead of N stacked ribbons. Splitting the
+# *last* pane instead makes every split land in the same shrinking corner, and the herdr
+# skill's warning about repeated same-direction splits then comes true immediately.
+#
+# Terminal cells are about twice as tall as wide, so `width > 2 * height` is the "looks wider
+# than tall" test. The 100-column floor stops a split that would leave either half too narrow
+# to read; below it the pane stacks instead. On a 121x65 tab that yields, in order: one full
+# pane; two rows; two rows with the lower split in half; then a 2x2 grid.
+MIN_SPLIT_WIDTH=100
+
+largest_pane_in_tab() {
+  local seed="$1" layout best_id="" best_area=-1 id w h area
+  layout=$(herdr pane layout --pane "$seed" 2>/dev/null) || { printf '%s\n' "$seed"; return; }
+  while IFS= read -r rec; do
+    id=$(printf '%s' "$rec" | json_string_field pane_id)
+    [ -n "$id" ] || continue
+    # Anchor on "rect". The first record also carries the layout's own "area", which is the
+    # whole tab — read unanchored, every first pane measures 121x65 on a 121x65 tab, always
+    # wins "largest", and every agent after the first lands inside it. That is exactly what
+    # happened on the first four-agent run: alpha was split three times and bravo, twice its
+    # area, was never touched.
+    w=$(printf '%s' "$rec" | json_number_field width '"rect"')
+    h=$(printf '%s' "$rec" | json_number_field height '"rect"')
+    case "$w" in ''|*[!0-9]*) continue ;; esac
+    case "$h" in ''|*[!0-9]*) continue ;; esac
+    area=$((w * h))
+    if [ "$area" -gt "$best_area" ]; then best_area=$area; best_id=$id; fi
+  done <<EOF
+$(printf '%s' "$layout" | json_records)
+EOF
+  printf '%s\n' "${best_id:-$seed}"
+}
+
+split_direction() {
+  local pane="$1" layout w h
+  layout=$(herdr pane layout --pane "$pane" 2>/dev/null) || { printf 'down\n'; return; }
+  w=$(printf '%s' "$layout" | json_number_field width "\"pane_id\":\"$pane\"")
+  h=$(printf '%s' "$layout" | json_number_field height "\"pane_id\":\"$pane\"")
+  case "$w" in ''|*[!0-9]*) printf 'down\n'; return ;; esac
+  case "$h" in ''|*[!0-9]*) printf 'down\n'; return ;; esac
+  if [ "$w" -ge "$MIN_SPLIT_WIDTH" ] && [ "$w" -gt $((2 * h)) ]; then
+    printf 'right\n'
+  else
+    printf 'down\n'
+  fi
+}
+
+# CC_TEAM_ORCHESTRATOR is the only one of these a child needs to reply: it is the Claude Code
+# peer name that SendMessage addresses, and the caller passes it because a session cannot read
+# its own name from the environment.
+#
+# CC_TEAM_ORCHESTRATOR_PANE is the durable handle. $HERDR_PANE_ID survives a `claude --resume`
+# in the same pane; $CLAUDE_CODE_SESSION_ID does not stay in step with it. Observed 2026-09-10:
+# after a resume this session's shell still reported CLAUDE_CODE_SESSION_ID=e9edfb37… and Herdr
+# still reported the same value for the pane (it reads what the process announced at startup),
+# while the messaging identity had moved from rollout-collection-8c [bcfc95] to
+# rollout-collection-fc [64e7b6]. So the session uuid is kept for correlation but marked for
+# what it is — a startup-time value that a resume can strand — and nothing is built on it.
+env_args=()
+for kv in "CC_TEAM_TASK=$task" "CC_TEAM_AGENT=$name" \
+          "CC_TEAM_ORCHESTRATOR=$orchestrator" \
+          "CC_TEAM_ORCHESTRATOR_PANE=${HERDR_PANE_ID:-}" \
+          "CC_TEAM_ORCHESTRATOR_SESSION_AT_START=${CLAUDE_CODE_SESSION_ID:-}" \
+          ${envs[@]+"${envs[@]}"}; do
+  env_args+=(--env "$kv")
+done
+
+# Trust preflight — run before anything is created, so a refusal costs no pane.
+#
+# Claude Code gates each working directory behind a one-time "Is this a project you created
+# or one you trust?" dialog and records the answer in ~/.claude.json as
+# projects["<cwd>"].hasTrustDialogAccepted. No flag answers it: `claude --help` documents the
+# dialog being skipped only in non-interactive mode (-p, or a non-TTY stdout), which is not
+# what a pane is. So a spawn into an untrusted directory sits on the dialog, never reaches
+# interactive_ready, and `herdr agent start` fails naming a pane rather than a cause.
+#
+# Observed 2026-09-10: spawning with --cwd into a fresh temp directory produced
+#   herdr-spawn: herdr agent start failed for 'newdirprobe' in pane w7:pM
+# with the trust dialog on screen in that pane. Spawns into an already-trusted repo, and into
+# a worktree beneath it that had no entry of its own, both came up clean — trust covers
+# descendants, so the check below does too.
+CLAUDE_CONFIG="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+
+# Project keys are stored with forward slashes; cygpath -w handed us backslashes.
+path_key() { printf '%s' "$1" | tr '\\' '/' | sed 's:/*$::'; }
+lower_ascii() { printf '%s' "$1" | tr 'A-Z' 'a-z'; }
+
+# The keys whose hasTrustDialogAccepted is true, one per line. Claude Code writes this file
+# pretty-printed at a fixed indent — project keys at four spaces, their fields at six — which
+# is what lets a line-oriented reader stay honest without jq. If that shape ever changes this
+# returns nothing, and the caller warns rather than blocking every spawn on a parser.
+trusted_projects() {
+  [ -r "$CLAUDE_CONFIG" ] || return 0
+  awk '
+    /^  "projects": \{/ { inproj = 1; next }
+    inproj && /^  \}/   { inproj = 0 }
+    inproj && /^    "/ {
+      key = $0
+      sub(/^    "/, "", key)
+      sub(/":.*$/, "", key)
+      next
+    }
+    inproj && key != "" && /^      "hasTrustDialogAccepted": true/ { print key }
+  ' "$CLAUDE_CONFIG"
+}
+
+# trusted | untrusted | case-mismatch | unknown.
+#
+# case-mismatch is called out on its own because the two paths are indistinguishable to
+# someone reading them. Keys are case-sensitive strings, so one folder can appear twice —
+# a Windows machine was seen carrying "d:/code/..." (false) beside "D:/code/..." (true) — and
+# "untrusted" is a baffling thing to be told about a directory you trusted last week.
+trust_state() {
+  local want lwant key lkey any=no near=no
+  want=$(path_key "$1")
+  lwant=$(lower_ascii "$want")
+  while IFS= read -r key; do
+    key=$(path_key "$key")
+    [ -n "$key" ] || continue
+    any=yes
+    case "$want" in
+      "$key"|"$key"/*) printf 'trusted\n'; return ;;
+    esac
+    lkey=$(lower_ascii "$key")
+    case "$lwant" in
+      "$lkey"|"$lkey"/*) near=yes ;;
+    esac
+  done <<EOF
+$(trusted_projects)
+EOF
+  if   [ "$any" = no ];    then printf 'unknown\n'
+  elif [ "$near" = yes ];  then printf 'case-mismatch\n'
+  else                          printf 'untrusted\n'
+  fi
+}
+
+# Write the entry the dialog would have written. Node is the dependency here rather than jq
+# because Claude Code ships on it, so any machine that can run a spawned agent can run this.
+#
+# A live session rewrites ~/.claude.json wholesale from its own memory, so an entry seeded
+# here can be dropped again by a session that started before it. Spawn straight after
+# seeding; the child records its own entry once it settles.
+grant_trust() {
+  local key="$1"
+  if [ "$dry_run" = yes ]; then
+    printf '+ record %s as trusted in %s\n' "$key" "$CLAUDE_CONFIG" >&2
+    return 0
+  fi
+  command -v node >/dev/null 2>&1 \
+    || die "--trust needs node to edit $CLAUDE_CONFIG; answer the dialog in the pane instead"
+  node -e '
+    const fs = require("fs");
+    const file = process.argv[1], key = process.argv[2];
+    const conf = JSON.parse(fs.readFileSync(file, "utf8"));
+    conf.projects = conf.projects || {};
+    conf.projects[key] = Object.assign({}, conf.projects[key], { hasTrustDialogAccepted: true });
+    const tmp = file + ".herdr-spawn.tmp";
+    fs.writeFileSync(tmp, JSON.stringify(conf, null, 2) + "\n");
+    fs.renameSync(tmp, file);
+  ' "$CLAUDE_CONFIG" "$key" || die "could not record trust for $key in $CLAUDE_CONFIG"
+}
+
+# Checked even under --dry-run: reading the config mutates nothing, and a dry run that
+# stayed silent about a refusal would be the one place you most wanted to hear about it.
+case "$(trust_state "$cwd")" in
+  trusted) ;;
+  unknown)
+    printf '%s: warning: no trusted projects readable in %s; spawning without the check\n' \
+      "$SELF" "$CLAUDE_CONFIG" >&2 ;;
+  case-mismatch)
+    [ "$trust" = yes ] || die "$(printf '%s\n' \
+      "$cwd is trusted under a different spelling of the same path." \
+      "Trust keys in $CLAUDE_CONFIG are case-sensitive strings, so one folder can hold two" \
+      "entries carrying two answers. Reconcile them there, or pass --trust to record this one.")"
+    grant_trust "$(path_key "$cwd")" ;;
+  untrusted)
+    [ "$trust" = yes ] || die "$(printf '%s\n' \
+      "Claude Code has not been trusted with $cwd, so a session started there would stop on" \
+      "its trust dialog and never report ready — the spawn would fail naming a pane, not a cause." \
+      "Spawn somewhere already trusted, or pass --trust if you would answer yes yourself.")"
+    grant_trust "$(path_key "$cwd")" ;;
+esac
+
+tab_id=$(tab_id_for_label "$task")
+
+if [ -z "$tab_id" ]; then
+  created=$(run herdr tab create --workspace "$HERDR_WORKSPACE_ID" \
+                 --label "$task" --cwd "$cwd" "${env_args[@]}" --no-focus) \
+    || die "herdr tab create failed"
+  if [ "$dry_run" = yes ]; then
+    tab_id="<new-tab>"; pane_id="<new-tab-root-pane>"
+  else
+    tab_id=$(printf '%s' "$created" | json_string_field tab_id)
+    pane_id=$(printf '%s' "$created" | json_string_field pane_id "root_pane")
+    [ -n "$pane_id" ] || die "tab create returned no root pane: $created"
+  fi
+else
+  seed=$(panes_in_tab "$tab_id" | tail -n 1)
+  [ -n "$seed" ] || die "tab $tab_id ($task) reports no panes"
+  target=$(largest_pane_in_tab "$seed")
+  dir=$(split_direction "$target")
+  split=$(run herdr pane split "$target" --direction "$dir" --cwd "$cwd" \
+               "${env_args[@]}" --no-focus) \
+    || die "herdr pane split failed"
+  if [ "$dry_run" = yes ]; then
+    pane_id="<new-split-pane>"
+  else
+    pane_id=$(printf '%s' "$split" | json_string_field pane_id "\"pane\"")
+    [ -n "$pane_id" ] || die "pane split returned no pane: $split"
+  fi
+fi
+
+session_id=$(uuid4)
+
+# --name sets the Claude Code peer name that SendMessage addresses; --session-id pins the
+# uuid that `herdr agent list` reports back as agent_session.value. Native claude flags only
+# after `--`, per the herdr skill.
+run herdr agent start "$name" --kind claude --pane "$pane_id" -- \
+    --name "$name" --session-id "$session_id" ${claude_args[@]+"${claude_args[@]}"} \
+  || die "herdr agent start failed for '$name' in pane $pane_id (see: herdr pane read $pane_id)"
+
+if [ -n "$prompt" ]; then
+  if [ "$wait_for_settle" = yes ]; then
+    run herdr agent prompt "$name" "$prompt" --wait --timeout "$timeout_ms" \
+      || die "prompt to '$name' did not settle; inspect with: herdr agent get $name"
+  else
+    run herdr agent prompt "$name" "$prompt" \
+      || die "prompt to '$name' was not submitted; inspect with: herdr agent get $name"
+  fi
+fi
+
+printf '{"agent":"%s","task":"%s","workspace_id":"%s","tab_id":"%s","pane_id":"%s","session_id":"%s","prompted":%s}\n' \
+  "$name" "$task" "$HERDR_WORKSPACE_ID" "$tab_id" "$pane_id" "$session_id" \
+  "$([ -n "$prompt" ] && echo true || echo false)"
