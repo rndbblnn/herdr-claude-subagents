@@ -126,13 +126,18 @@ A spawned session picks up whatever your `settings.json` makes the startup defau
 auto mode is a global opt-in there, children come up in auto mode too — verified 2026-09-10,
 both a repo-root and a worktree spawn showing `⏵⏵ auto mode on` with no flag passed.
 
+**Don't pass `--permission-mode` by default.** The operator's `defaultMode` is the mode they
+chose for unattended work; a flag overrides it. In particular don't pass `acceptEdits`: it
+still prompts for every Bash command, so an unattended child stalls on its first one.
+
 What does *not* carry over is a mode you cycled by hand with shift+tab, which nothing
 persists, and a project's `.claude/settings.local.json` allow-list, which applies only while
-the cwd is inside that project. Pin the mode explicitly when it matters:
+the cwd is inside that project. Pass a mode only when the operator asks for one, or to make a
+child stricter than the default (e.g. `plan` for a read-only reviewer):
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-spawn.sh" tester --task review-auth \
-  --orchestrator <you> -- --permission-mode acceptEdits
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-spawn.sh" reviewer --task review-auth \
+  --orchestrator <you> -- --permission-mode plan
 ```
 
 A peer's permissions are its own: never route work a hook or a denial blocked in your session

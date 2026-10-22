@@ -178,7 +178,7 @@ Live agent names are unique. Close the old tab first.
 <details>
 <summary><b>The child came up in the wrong permission mode</b></summary>
 <br/>
-A mode you switched with shift+tab doesn't carry over to children. Pin it with <code>-- --permission-mode acceptEdits</code>.
+Children start in your <code>settings.json</code> <code>defaultMode</code>; a mode you switched with shift+tab doesn't carry over. Set <code>"defaultMode": "auto"</code> for unattended teams, or pass <code>-- --permission-mode &lt;mode&gt;</code> to one spawn. Avoid <code>acceptEdits</code> for children: it still asks before every Bash command, so an unattended pane stalls.
 </details>
 
 <details>
