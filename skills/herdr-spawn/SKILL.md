@@ -63,6 +63,9 @@ Useful options:
 | `--dry-run` | print the herdr commands without running them |
 | `-- <claude args...>` | passed to `claude` verbatim — see permission mode below |
 
+The spawner also labels the panes for Herdr's agent panel: each child shows its own name with
+`$under` = "↳ <orchestrator>", and your pane shows your name. The README has the layout.
+
 Every spawned pane receives `CC_TEAM_TASK`, `CC_TEAM_AGENT`, `CC_TEAM_ORCHESTRATOR`,
 `CC_TEAM_ORCHESTRATOR_PANE` and `CC_TEAM_ORCHESTRATOR_SESSION_AT_START`.
 
@@ -151,11 +154,17 @@ operator.
 
 ## Tear down
 
-Close the tab you created, which takes its panes with it:
+A child starts its last report with `FINAL:` (the return path tells it to). When one arrives
+and you need nothing more from that child, close it:
 
 ```bash
-herdr tab close w7:t3
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-spawn.sh" reviewer --close
 ```
+
+That closes its pane, which removes its row from Herdr's agent panel, and Herdr drops the
+tab with its last pane. Herdr's `done` status is not a signal for this: it means one turn
+ended, including a child that is waiting for your answer. To end a whole team at once, close
+its tab with `herdr tab close <tab id>`.
 
 Do this when the task is done — live agent names are unique, so a forgotten `reviewer` blocks
 the next one. Never close a tab, pane or workspace you did not create.

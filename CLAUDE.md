@@ -14,6 +14,17 @@
   spawner appends a SendMessage-back instruction via `--append-system-prompt` (merging into a
   caller's own, since claude takes one value). Herdr passes it as a single argv element —
   verified 2026-10-23 with a live haiku probe that reported back unprompted.
+- **Sidebar tags are display-only pane metadata** (`herdr pane report-metadata --source
+  herdr-spawn`): `--display-agent` on both ends (the built-in `agent` token says "claude" for
+  every Claude pane), `$team`/`$parent`/`$under` on the child. `$under` carries "↳ " because
+  layouts can't hold literal text. They last until the pane closes, and failure only warns.
+  Herdr has no agent-row indentation (only worktree Spaces nest), so "hierarchy" means these tags
+  plus the default `spaces` sort. Verified live 2026-10-23.
+- **`--close` is explicit, never status-driven.** Herdr's `done` fires after every turn,
+  including a child waiting for an answer. Closing the last pane of a tab removes the tab
+  (verified 2026-10-23), so `--close` only closes the pane. It refuses `$HERDR_PANE_ID`.
+- **The orchestrator's display name goes stale** when it is renamed (resume or compaction:
+  observed 5d→5e on 2026-10-23); children recover through ListAgents, the label does not.
 - **Test before release:** `./test.sh` (hook allow/block matrix + spawner against a fake
   `herdr` that logs argv; `KEEP_T=1` keeps the logs), then `claude plugin validate .`. The fake
   `.claude.json` must be pretty-printed: the trust reader is indent-based.
