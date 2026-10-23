@@ -124,6 +124,7 @@ bash "$CLAUDE_PLUGIN_ROOT/scripts/herdr-spawn.sh" reviewer \
 
 herdr agent get reviewer      # idle | working | blocked | done
 herdr agent read reviewer     # what is it doing right now?
+bash "$CLAUDE_PLUGIN_ROOT/scripts/herdr-spawn.sh" reviewer --close   # done: pane and row go
 herdr tab close <tab id>      # tear the whole team down
 ```
 
@@ -140,6 +141,27 @@ Set these as env vars, for example in `settings.json` → `env`:
 |---|---|
 | `CC_HERDR_ALLOWED_AGENTS=bulk-reader,my-auditor` | More agent types that may stay in-process. List your own read-only agents here. |
 | `CC_ALLOW_INPROCESS_AGENTS=1` | Turns the redirect off for one session. |
+
+### 🌳 Show the hierarchy in Herdr's agent panel
+
+The spawner labels each pane: every child shows its own name (not "claude") with `$under` = `↳ <parent>`, and the parent shows its own name. Add this to `~/.config/herdr/config.toml`, then run `herdr server reload-config`:
+
+```toml
+[ui.sidebar.agents.rows_by_agent]
+claude = [
+  ["state_icon", "agent", { token = "$under", fg = "#7d8590" }],
+  [{ token = "workspace", dim = true }, { token = "tab", dim = true }],
+]
+```
+
+```text
+● local-playground-5d
+  local_playground · 1
+● reviewer · ↳ local-playground-5d
+  local_playground · review-auth
+```
+
+Keep `ui.agent_panel_sort` on its default `"spaces"` so each team stays under its parent. `$team` and `$parent` are there too, for your own layouts and rules.
 
 <a id="requirements"></a>
 
@@ -168,6 +190,12 @@ No. Read-only agent types like <code>Explore</code> stay in-process. Only agents
 <summary><b>What happens when a child has a question?</b></summary>
 <br/>
 It asks its parent. The spawner tells every child to send task questions to the orchestrator with <code>SendMessage</code> and wait for the reply, rather than opening an AskUserQuestion dialog in its own pane. The parent answers or asks you. Permission prompts still show in the child's pane, and Herdr marks it <code>blocked</code>.
+</details>
+
+<details>
+<summary><b>How do finished children leave the agent panel?</b></summary>
+<br/>
+The child starts its last report with <code>FINAL:</code>, and the parent runs <code>herdr-spawn.sh &lt;name&gt; --close</code>. That closes its pane, which removes its row, and the tab goes with its last pane. It isn't automatic on Herdr's <code>done</code> status, because that fires after every turn, including when a child is waiting for your answer.
 </details>
 
 <details>

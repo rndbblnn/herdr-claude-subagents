@@ -28,6 +28,8 @@
 #
 # Usage
 #   herdr-spawn.sh <name> --task <slug> [options] [-- <claude args...>]
+#   herdr-spawn.sh <name> --close     close a finished agent's pane (and its tab, if it was
+#                                     the last pane); its sidebar row goes with it
 #
 #   --task <slug>          tab label; the unit that groups one team           (required)
 #   --prompt <text>        submitted after the agent reports ready
@@ -46,6 +48,7 @@
 # Every spawned pane also receives:
 #   CC_TEAM_TASK, CC_TEAM_AGENT, CC_TEAM_ORCHESTRATOR, CC_TEAM_ORCHESTRATOR_PANE,
 #   CC_TEAM_ORCHESTRATOR_SESSION_AT_START
+# and display-only pane metadata for the sidebar: $team (the task), $parent (--orchestrator).
 #
 # Prints one JSON line describing the spawn.
 
@@ -104,6 +107,7 @@ trust=no
 wait_for_settle=no
 timeout_ms=300000
 dry_run=no
+close=no
 envs=()
 claude_args=()
 
@@ -122,6 +126,7 @@ while [ $# -gt 0 ]; do
     --timeout)      timeout_ms="${2-}"; shift 2 ;;
     --wait)         wait_for_settle=yes; shift ;;
     --dry-run)      dry_run=yes; shift ;;
+    --close)        close=yes; shift ;;
     --)             shift; claude_args=("$@"); break ;;
     *)              die "unknown option '$1'" ;;
   esac
@@ -134,6 +139,25 @@ fi
 
 [ "${HERDR_ENV:-}" = 1 ] || die "not running inside a Herdr pane (HERDR_ENV is not 1)"
 [ -n "${HERDR_WORKSPACE_ID:-}" ] || die "HERDR_WORKSPACE_ID is unset"
+
+run() {
+  if [ "$dry_run" = yes ]; then printf '+ %s\n' "$*" >&2; return 0; fi
+  "$@"
+}
+
+# Teardown. Herdr drops a tab with its last pane, and the sidebar row with the pane, so
+# closing the pane is the whole job. Herdr's `done` only means a turn ended, so this is the
+# orchestrator's call once it has the child's final report, never a status-triggered hook.
+if [ "$close" = yes ]; then
+  info=$(herdr agent get "$name" 2>/dev/null) || die "no live agent named '$name' (herdr agent list)"
+  close_pane=$(printf '%s' "$info" | json_string_field pane_id)
+  [ -n "$close_pane" ] || die "could not read the pane of '$name' from herdr agent get"
+  [ "$close_pane" != "${HERDR_PANE_ID:-}" ] || die "refusing to close '$name': that is this pane"
+  run herdr pane close "$close_pane" >/dev/null || die "herdr pane close $close_pane failed"
+  printf '{"agent":"%s","pane_id":"%s","closed":true}\n' "$name" "$close_pane"
+  exit 0
+fi
+
 [ -n "$task" ] || die "--task <slug> is required; it is the tab label that groups the team"
 
 # Herdr's own constraint, enforced here so a bad name fails naming the rule, not the symptom.
@@ -149,11 +173,6 @@ esac
 if herdr agent get "$name" >/dev/null 2>&1; then
   die "an agent named '$name' is already live; names must be unique (herdr agent list)"
 fi
-
-run() {
-  if [ "$dry_run" = yes ]; then printf '+ %s\n' "$*" >&2; return 0; fi
-  "$@"
-}
 
 tab_id_for_label() {
   herdr tab list --workspace "$HERDR_WORKSPACE_ID" \
@@ -395,7 +414,7 @@ session_id=$(uuid4)
 # to AskUserQuestion in its own pane, where the orchestrator never sees them. A caller's own
 # --append-system-prompt is kept: ours is prepended to it, since claude takes one value.
 if [ -n "$orchestrator" ]; then
-  return_path="You are \"$name\", a Claude Code session spawned in its own Herdr pane by the session \"$orchestrator\" (your orchestrator) for task \"$task\". When you finish, send your results to it with SendMessage (to: \"$orchestrator\"). Send questions about the task the same way and wait for the reply, instead of using AskUserQuestion: nobody may be watching this pane. Use AskUserQuestion only when the orchestrator tells you to ask the operator directly. If SendMessage cannot find \"$orchestrator\", it was probably resumed under a new name; run ListAgents to find it."
+  return_path="You are \"$name\", a Claude Code session spawned in its own Herdr pane by the session \"$orchestrator\" (your orchestrator) for task \"$task\". When you finish, send your results to it with SendMessage (to: \"$orchestrator\"). Send questions about the task the same way and wait for the reply, instead of using AskUserQuestion: nobody may be watching this pane. Use AskUserQuestion only when the orchestrator tells you to ask the operator directly. Start your final report with \"FINAL:\" and send it only when nothing is left to do: your orchestrator closes your pane when it gets one. If SendMessage cannot find \"$orchestrator\", it was probably resumed under a new name; run ListAgents to find it."
   merged=no
   for i in ${claude_args[@]+"${!claude_args[@]}"}; do
     case "${claude_args[$i]}" in
@@ -415,6 +434,23 @@ fi
 run herdr agent start "$name" --kind claude --pane "$pane_id" -- \
     --name "$name" --session-id "$session_id" ${claude_args[@]+"${claude_args[@]}"} \
   || die "herdr agent start failed for '$name' in pane $pane_id (see: herdr pane read $pane_id)"
+
+# Sidebar hierarchy, display only, lasting until the pane closes. Herdr's `agent` token
+# reads "claude" for every Claude pane, so both ends get their peer name as display name;
+# $team, $parent and $under ("↳ parent", since layouts cannot hold literal text) are for a
+# [ui.sidebar.agents] layout (README has one). Losing them only loses the display, so a
+# Herdr without report-metadata warns instead of failing the spawn.
+tag_pane() { # <pane> <report-metadata args...>
+  local pane="$1"; shift
+  run herdr pane report-metadata "$pane" --source herdr-spawn "$@" >/dev/null \
+    || printf '%s: warning: could not tag pane %s for the sidebar\n' "$SELF" "$pane" >&2
+}
+meta=(--display-agent "$name" --token "team=$task")
+[ -z "$orchestrator" ] || meta+=(--token "parent=$orchestrator" --token "under=↳ $orchestrator")
+tag_pane "$pane_id" "${meta[@]}"
+if [ -n "$orchestrator" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
+  tag_pane "$HERDR_PANE_ID" --display-agent "$orchestrator"
+fi
 
 if [ -n "$prompt" ]; then
   if [ "$wait_for_settle" = yes ]; then

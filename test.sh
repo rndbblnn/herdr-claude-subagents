@@ -37,7 +37,12 @@ cat > "$T/bin/herdr" <<'FAKE'
 case "$1 $2" in
   "tab list")   echo '{"result":{"tabs":[]}}' ;;
   "tab create") echo '{"result":{"tab":{"tab_id":"w0:t9"},"root_pane":{"pane_id":"w0:p9"}}}' ;;
-  "agent get")  exit 1 ;;   # no agent by that name is live
+  "agent get")
+    case "$3" in
+      done1) echo '{"result":{"agent":{"name":"done1","pane_id":"w0:p7","tab_id":"w0:t9"}}}' ;;
+      me)    echo '{"result":{"agent":{"name":"me","pane_id":"w0:p1","tab_id":"w0:t1"}}}' ;;
+      *)     exit 1 ;;   # no agent by that name is live
+    esac ;;
 esac
 FAKE
 chmod +x "$T/bin/herdr"
@@ -66,6 +71,21 @@ expect "caller's --append-system-prompt kept, ours first" \
 spawn "$T/c" reviewer --task t1
 expect "no --orchestrator, no return path" \
   bash -c 'grep -qx start "$1" && ! grep -q -- --append-system-prompt "$1"' _ "$T/c"
+# The argv of the first call to `herdr <1> <2>`, one arg per line.
+call() { awk -v a="$2" -v b="$3" 'p&&/^--end--$/{exit} p{print} prev==a&&$0==b{p=1} {prev=$0}' "$1"; }
+expect "child pane tagged with \$team and \$parent" \
+  bash -c 'c=$(printf "%s\n" "$1"); [[ "$c" == *w0:p9*team=t1*parent=boss* ]]' _ "$(call "$T/a" pane report-metadata)"
+expect "no --orchestrator, \$team only" \
+  bash -c '[[ "$1" == *team=t1* && "$1" != *parent=* ]]' _ "$(call "$T/c" pane report-metadata)"
+expect "orchestrator pane gets its name as display name" \
+  bash -c 'awk "/^report-metadata\$/{r=1} r&&/^--end--\$/{r=0} r" "$1" | tr "\n" " " | grep -q "w0:p1 --source herdr-spawn --display-agent boss"' _ "$T/a"
+spawn "$T/d" done1 --close
+expect "--close closes the agent's pane" \
+  bash -c 'test ! -s "$2.err" && [ "$1" = w0:p7 ]' _ "$(call "$T/d" pane close)" "$T/d"
+spawn "$T/e" me --close
+expect "--close refuses this pane" bash -c 'test -s "$1.err" && ! grep -qx close "$1"' _ "$T/e"
+spawn "$T/f" ghost --close
+expect "--close on an unknown agent fails" bash -c 'test -s "$1.err" && ! grep -qx close "$1"' _ "$T/f"
 
 for f in "$ROOT"/hooks/*.sh "$ROOT"/scripts/*.sh; do
   bash -n "$f" && echo "ok   syntax $(basename "$f")" || { echo "FAIL syntax $f"; fail=1; }
