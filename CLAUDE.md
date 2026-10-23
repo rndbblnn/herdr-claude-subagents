@@ -10,10 +10,15 @@
   always exit 0.
 - **Why not make in-process subagents visible?** It can't be done: Herdr's
   `pane report-agent` needs a real pane id, and an in-process subagent has none.
-- **Test before release:** `./test.sh` (hook allow/block matrix + spawner `--dry-run`), then
-  `claude plugin validate .`.
+- **The return path lives in the spawner, not the prompt.** With `--orchestrator`, the
+  spawner appends a SendMessage-back instruction via `--append-system-prompt` (merging into a
+  caller's own, since claude takes one value). Herdr passes it as a single argv element —
+  verified 2026-10-23 with a live haiku probe that reported back unprompted.
+- **Test before release:** `./test.sh` (hook allow/block matrix + spawner against a fake
+  `herdr` that logs argv; `KEEP_T=1` keeps the logs), then `claude plugin validate .`. The fake
+  `.claude.json` must be pretty-printed: the trust reader is indent-based.
 - **Upstream:** the code comes from github.com/assafcaf/herdr-claude-setup (MIT, by assafcaf).
   Keep his copyright line in LICENSE. To pull in upstream fixes, diff against
   `claude/{hooks,scripts,skills}` in a clone of that repo. Changes made here: paths use
-  `${CLAUDE_PLUGIN_ROOT}`, examples are generic, `CC_HERDR_ALLOWED_AGENTS` was added, and
+  `${CLAUDE_PLUGIN_ROOT}`, examples are generic, `CC_HERDR_ALLOWED_AGENTS` was added, the return path is automatic, and
   `evidence-reviewer` was removed from the built-in allowlist.

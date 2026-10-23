@@ -64,9 +64,14 @@ Useful options:
 | `-- <claude args...>` | passed to `claude` verbatim — see permission mode below |
 
 Every spawned pane receives `CC_TEAM_TASK`, `CC_TEAM_AGENT`, `CC_TEAM_ORCHESTRATOR`,
-`CC_TEAM_ORCHESTRATOR_PANE` and `CC_TEAM_ORCHESTRATOR_SESSION_AT_START`. Tell the child to read
-`CC_TEAM_ORCHESTRATOR` and reply to it with `SendMessage`; that is the return path, and it is
-the one thing a spawned agent cannot work out for itself.
+`CC_TEAM_ORCHESTRATOR_PANE` and `CC_TEAM_ORCHESTRATOR_SESSION_AT_START`.
+
+The return path is automatic when you pass `--orchestrator`: the spawner appends a standing
+instruction to the child's system prompt (`--append-system-prompt`) telling it to send results
+*and task questions* to you with `SendMessage` instead of AskUserQuestion. You don't need to
+repeat that in `--prompt`. Expect questions to arrive as peer messages; answer what you can and
+ask the operator what you can't. Your own `-- --append-system-prompt` is kept, after ours.
+Without `--orchestrator` the child has no way to find you.
 
 Pass `--orchestrator` from `ListAgents`, never from `$CLAUDE_CODE_SESSION_ID`. A
 `claude --resume` gives the session a new messaging identity while the environment variable and

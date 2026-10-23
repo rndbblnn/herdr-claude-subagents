@@ -32,7 +32,8 @@
 #   --task <slug>          tab label; the unit that groups one team           (required)
 #   --prompt <text>        submitted after the agent reports ready
 #   --orchestrator <name>  this session's Claude Code peer name, so the child can
-#                          SendMessage back; read it from ListAgents
+#                          SendMessage back; read it from ListAgents. Also appended to
+#                          the child's system prompt as standing reporting instructions
 #   --cwd <path>           working directory for the pane        (default: $PWD)
 #   --trust                record --cwd as trusted before spawning, instead of refusing
 #                          to spawn into a directory Claude Code would stop and ask about
@@ -388,6 +389,25 @@ else
 fi
 
 session_id=$(uuid4)
+
+# The return path, written into the child's system prompt so it holds whatever --prompt says.
+# Without it a child reports back only if the caller remembered to ask, and its questions go
+# to AskUserQuestion in its own pane, where the orchestrator never sees them. A caller's own
+# --append-system-prompt is kept: ours is prepended to it, since claude takes one value.
+if [ -n "$orchestrator" ]; then
+  return_path="You are \"$name\", a Claude Code session spawned in its own Herdr pane by the session \"$orchestrator\" (your orchestrator) for task \"$task\". When you finish, send your results to it with SendMessage (to: \"$orchestrator\"). Send questions about the task the same way and wait for the reply, instead of using AskUserQuestion: nobody may be watching this pane. Use AskUserQuestion only when the orchestrator tells you to ask the operator directly. If SendMessage cannot find \"$orchestrator\", it was probably resumed under a new name; run ListAgents to find it."
+  merged=no
+  for i in ${claude_args[@]+"${!claude_args[@]}"}; do
+    case "${claude_args[$i]}" in
+      --append-system-prompt)
+        claude_args[i+1]="$return_path ${claude_args[i+1]-}"; merged=yes; break ;;
+      --append-system-prompt=*)
+        claude_args[i]="--append-system-prompt=$return_path ${claude_args[i]#--append-system-prompt=}"
+        merged=yes; break ;;
+    esac
+  done
+  [ "$merged" = yes ] || claude_args+=(--append-system-prompt "$return_path")
+fi
 
 # --name sets the Claude Code peer name that SendMessage addresses; --session-id pins the
 # uuid that `herdr agent list` reports back as agent_session.value. Native claude flags only
