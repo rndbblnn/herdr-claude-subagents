@@ -110,6 +110,7 @@ There are three moving parts:
 |---|---|---|
 | 🛑 | **The hook** (`hooks/route-agent-to-herdr.sh`) | A `PreToolUse` hook on `Agent`. **Inside Herdr only**, it blocks subagent types that can write files or run long, and points Claude to the spawner. Read-only lookups (`Explore`, `claude-code-guide`, `statusline-setup`) still run in-process. |
 | 🐑 | **The spawner** (`scripts/herdr-spawn.sh`) | Starts one named `claude` session in a pane, in the task's tab, creating the tab on first use. The Herdr agent name, the Claude peer name and the session id all match, so `herdr agent read reviewer` and `SendMessage({to: "reviewer"})` reach the same pane. The child also knows who spawned it, so it can report back. |
+| 📨 | **The return path** | With `--orchestrator`, every child gets a standing instruction in its system prompt: send results and task questions back to the parent with `SendMessage`, instead of asking in a pane nobody is watching. |
 | 📖 | **The skill** (`skills/herdr-spawn`) | Teaches Claude how to spawn, drive and tear down a team. |
 
 ## 🎮 Drive it yourself
@@ -161,6 +162,12 @@ It can't be done. Herdr's <code>pane report-agent</code> needs a real pane id, a
 <summary><b>Won't this make cheap lookups slow?</b></summary>
 <br/>
 No. Read-only agent types like <code>Explore</code> stay in-process. Only agents that write files or run long get a pane. Add your own read-only agents to <code>CC_HERDR_ALLOWED_AGENTS</code>.
+</details>
+
+<details>
+<summary><b>What happens when a child has a question?</b></summary>
+<br/>
+It asks its parent. The spawner tells every child to send task questions to the orchestrator with <code>SendMessage</code> and wait for the reply, rather than opening an AskUserQuestion dialog in its own pane. The parent answers or asks you. Permission prompts still show in the child's pane, and Herdr marks it <code>blocked</code>.
 </details>
 
 <details>

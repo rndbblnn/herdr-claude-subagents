@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hook allow/block matrix + spawner dry run. Usage: ./test.sh
+# Hook allow/block matrix + spawner against a fake herdr. Usage: ./test.sh (KEEP_T=1 keeps logs)
 set -u
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 HOOK="$ROOT/hooks/route-agent-to-herdr.sh"
@@ -25,6 +25,47 @@ check 0 "CC_ALLOW_INPROCESS_AGENTS=1 escape"      general-purpose HERDR_ENV=1 CC
 msg=$(payload general-purpose | HERDR_ENV=1 bash "$HOOK" 2>&1 >/dev/null)
 case "$msg" in *scripts/herdr-spawn.sh*skills/herdr-spawn/SKILL.md*) echo "ok   refusal names spawner and skill";;
   *) echo "FAIL refusal message"; fail=1;; esac
+
+# Spawner, against a fake herdr that records each call's argv (one arg per line) so the
+# return-path system prompt can be checked as a single, intact claude argument.
+T=$(mktemp -d)
+if [ -n "${KEEP_T:-}" ]; then echo "test dir kept: $T" >&2; else trap 'rm -rf "$T"' EXIT; fi
+mkdir -p "$T/bin" "$T/cfg"
+cat > "$T/bin/herdr" <<'FAKE'
+#!/usr/bin/env bash
+{ printf '%s\n' "$@"; echo '--end--'; } >> "$FAKE_LOG"
+case "$1 $2" in
+  "tab list")   echo '{"result":{"tabs":[]}}' ;;
+  "tab create") echo '{"result":{"tab":{"tab_id":"w0:t9"},"root_pane":{"pane_id":"w0:p9"}}}' ;;
+  "agent get")  exit 1 ;;   # no agent by that name is live
+esac
+FAKE
+chmod +x "$T/bin/herdr"
+# Pretty-printed like Claude Code writes it; the spawner's trust reader depends on that indent.
+printf '{\n  "projects": {\n    "%s": {\n      "hasTrustDialogAccepted": true\n    }\n  }\n}\n' "$ROOT" > "$T/cfg/.claude.json"
+spawn() { # <log> <spawner args...>
+  local log="$1"; shift; : > "$log"
+  env PATH="$T/bin:$PATH" FAKE_LOG="$log" CLAUDE_CONFIG_DIR="$T/cfg" HERDR_ENV=1 \
+    HERDR_WORKSPACE_ID=w0 HERDR_PANE_ID=w0:p1 \
+    bash "$ROOT/scripts/herdr-spawn.sh" "$@" --cwd "$ROOT" >/dev/null 2>"$log.err"
+}
+expect() { # <label> <command...>
+  local label="$1"; shift
+  if "$@"; then echo "ok   $label"; else echo "FAIL $label"; fail=1; fi
+}
+# The arg after --append-system-prompt in the `agent start` call.
+appended() { awk '/^agent$/{a=1} a&&p{print; exit} a&&/^--append-system-prompt$/{p=1}' "$1"; }
+
+spawn "$T/a" reviewer --task t1 --orchestrator boss --prompt hi
+expect "spawn with --orchestrator succeeds" test ! -s "$T/a.err"
+expect "return path names orchestrator, agent and task" \
+  bash -c '[[ "$1" == *'"'"'"reviewer"'"'"'*'"'"'"boss"'"'"'*'"'"'"t1"'"'"'*SendMessage* ]]' _ "$(appended "$T/a")"
+spawn "$T/b" reviewer --task t1 --orchestrator boss -- --append-system-prompt "CALLER-TEXT"
+expect "caller's --append-system-prompt kept, ours first" \
+  bash -c '[[ "$1" == You\ are*CALLER-TEXT ]] && [ "$(grep -c -- --append-system-prompt "$2")" = 1 ]' _ "$(appended "$T/b")" "$T/b"
+spawn "$T/c" reviewer --task t1
+expect "no --orchestrator, no return path" \
+  bash -c 'grep -qx start "$1" && ! grep -q -- --append-system-prompt "$1"' _ "$T/c"
 
 for f in "$ROOT"/hooks/*.sh "$ROOT"/scripts/*.sh; do
   bash -n "$f" && echo "ok   syntax $(basename "$f")" || { echo "FAIL syntax $f"; fail=1; }
