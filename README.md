@@ -149,19 +149,19 @@ The spawner labels each pane: every child shows its own name (not "claude") with
 ```toml
 [ui.sidebar.agents.rows_by_agent]
 claude = [
-  ["state_icon", "agent", { token = "$under", fg = "#7d8590" }],
+  ["state_icon", "terminal_title_stripped", { token = "$under", fg = "#7d8590" }],
   [{ token = "workspace", dim = true }, { token = "tab", dim = true }],
 ]
 ```
 
 ```text
-● local-playground-5d
+● Refactor auth module          ← your session's own title
   local_playground · 1
 ● reviewer · ↳ local-playground-5d
   local_playground · review-auth
 ```
 
-Keep `ui.agent_panel_sort` on its default `"spaces"` so each team stays under its parent. `$team` and `$parent` are there too, for your own layouts and rules.
+The first line is the pane's terminal title. Claude sets it to the `--name` the spawner gives each child, and to a summary of the conversation in your own sessions. The built-in `agent` token would show "claude" for every pane the spawner didn't start. Keep `ui.agent_panel_sort` on its default `"spaces"` so each team stays under its parent. `$team` and `$parent` are there too, for your own layouts and rules.
 
 <a id="requirements"></a>
 
