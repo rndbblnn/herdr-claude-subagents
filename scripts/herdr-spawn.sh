@@ -437,15 +437,18 @@ run herdr agent start "$name" --kind claude --pane "$pane_id" -- \
 
 # Sidebar hierarchy, display only, lasting until the pane closes. Herdr's `agent` token
 # reads "claude" for every Claude pane, so both ends get their peer name as display name;
-# $team, $parent and $under ("↳ parent", since layouts cannot hold literal text) are for a
-# [ui.sidebar.agents] layout (README has one). Losing them only loses the display, so a
+# $team, $parent, $under ("↳ parent") and $nested (the name, indented) are for a
+# [ui.sidebar.agents] layout (README has one). Layouts cannot hold literal text, so the
+# decoration rides in the value. Herdr trims leading whitespace from token values, so the
+# indent is U+2800 (braille blank): not whitespace, renders empty, one cell wide. Losing them only loses the display, so a
 # Herdr without report-metadata warns instead of failing the spawn.
 tag_pane() { # <pane> <report-metadata args...>
   local pane="$1"; shift
   run herdr pane report-metadata "$pane" --source herdr-spawn "$@" >/dev/null \
     || printf '%s: warning: could not tag pane %s for the sidebar\n' "$SELF" "$pane" >&2
 }
-meta=(--display-agent "$name" --token "team=$task")
+indent=$'\u2800\u2800\u2800\u2800'
+meta=(--display-agent "$name" --token "team=$task" --token "nested=$indent$name")
 [ -z "$orchestrator" ] || meta+=(--token "parent=$orchestrator" --token "under=↳ $orchestrator")
 tag_pane "$pane_id" "${meta[@]}"
 if [ -n "$orchestrator" ] && [ -n "${HERDR_PANE_ID:-}" ]; then

@@ -75,6 +75,8 @@ expect "no --orchestrator, no return path" \
 call() { awk -v a="$2" -v b="$3" 'p&&/^--end--$/{exit} p{print} prev==a&&$0==b{p=1} {prev=$0}' "$1"; }
 expect "child pane tagged with \$team and \$parent" \
   bash -c 'c=$(printf "%s\n" "$1"); [[ "$c" == *w0:p9*team=t1*parent=boss* ]]' _ "$(call "$T/a" pane report-metadata)"
+expect "child pane gets an indented \$nested name" \
+  bash -c '[[ "$1" == *nested=$'"'"'\u2800'"'"'*reviewer* ]]' _ "$(call "$T/a" pane report-metadata)"
 expect "no --orchestrator, \$team only" \
   bash -c '[[ "$1" == *team=t1* && "$1" != *parent=* ]]' _ "$(call "$T/c" pane report-metadata)"
 expect "orchestrator pane gets its name as display name" \

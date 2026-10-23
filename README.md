@@ -149,19 +149,18 @@ The spawner labels each pane: every child shows its own name (not "claude") with
 ```toml
 [ui.sidebar.agents.rows_by_agent]
 claude = [
-  ["state_icon", "terminal_title_stripped", { token = "$under", fg = "#7d8590" }],
-  [{ token = "workspace", dim = true }, { token = "tab", dim = true }],
+  ["state_icon", "workspace"],
+  ["$nested"],
 ]
 ```
 
 ```text
-● Refactor auth module          ← your session's own title
-  local_playground · 1
-● reviewer · ↳ local-playground-5d
-  local_playground · review-auth
+● Lane B                        ← your session: just its workspace
+● Lane B
+      reviewer                  ← a child: indented name on the second line
 ```
 
-The first line is the pane's terminal title. Claude sets it to the `--name` the spawner gives each child, and to a summary of the conversation in your own sessions. The built-in `agent` token would show "claude" for every pane the spawner didn't start. Keep `ui.agent_panel_sort` on its default `"spaces"` so each team stays under its parent. `$team` and `$parent` are there too, for your own layouts and rules.
+`$nested` is the child's name, indented with blank U+2800 characters because Herdr trims leading spaces from token values. Only spawned children have it, so other sessions stay on one line. `$under` (`↳ <parent>`) is also available. Keep `ui.agent_panel_sort` on its default `"spaces"` so each team stays under its parent. `$team` and `$parent` are there too, for your own layouts and rules.
 
 <a id="requirements"></a>
 
