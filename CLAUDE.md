@@ -46,3 +46,31 @@
   `claude/{hooks,scripts,skills}` in a clone of that repo. Changes made here: paths use
   `${CLAUDE_PLUGIN_ROOT}`, examples are generic, `CC_HERDR_ALLOWED_AGENTS` was added, the return path is automatic, and
   `evidence-reviewer` was removed from the built-in allowlist.
+- **FINAL reports are files (2026-10-24).** `hooks/team-report.sh` is NOT in hooks.json: the
+  spawner injects it per child with `claude --settings <file>`, so it travels with whichever
+  spawner started the child and never runs in other sessions. Settings hooks merge with the
+  user's (verified live, claude 2.1.310). It fires on PostToolUse(SendMessage) and on Stop
+  (`last_assistant_message`, transcript fallback). A Stop echo never overwrites a SendMessage
+  report of the same session: children often end with "FINAL: ... sent". It must exit 0 on
+  every path, because a Stop hook that exits 2 keeps the child running.
+- **`--reap` keys on the report file, not on status.** A file whose `session_id` differs from
+  the pane's `agent_session.value` doesn't count (a stale file under a reused name), and a
+  spawn deletes the old file for its name. `--oneshot` is the hook closing its own pane after
+  Stop, detached via setsid with a 2s delay.
+- **Naming the orchestrator.** A pane Herdr auto-detected has `name: null`. `herdr agent rename
+  <pane> <name>` names it in place (verified, herdr 0.9.5). Herdr refuses uppercase, so the
+  name is lowercased ("LaneB" becomes "laneb"). This is Herdr's name only: it can't change a
+  Claude Code peer name, so a duplicate peer name in ListAgents never comes from here.
+- **Herdr types the claude command into the pane's shell.** With a long argv (a re-emitted
+  `--agents` JSON is ~2.6 KB), fish intermittently never ran it: a half-typed line with a
+  stray `}}'` at the end, then the startup timeout. The bytes typed were intact (captured into
+  `cat`), and the same argv passed 5 of 6 times, so it is a line-editor race. Mitigations: the
+  `--settings` JSON goes in a file, the `--agents` JSON is pure ASCII (`\uXXXX`), and a failed
+  `agent start` gets Ctrl-C and one retry. A scalar `tools: Read, Bash` used to be wrongly
+  rejected as unparseable. It is fixed now, and a test covers it.
+- **Sound: children should be silent, but Herdr can't fully do it (2026-10-24).** The operator
+  wants sound only when a parent finishes or needs help. The report notification uses
+  `--sound none`. Herdr's own state-change sounds (background workspaces only) can be muted
+  only per agent *kind* (`[ui.sound.agents] claude = "off"`), which would silence parents too.
+  Herdr 0.9.5 has no per-pane mute, and sound events are not logged, so none of this can be
+  checked except by ear.

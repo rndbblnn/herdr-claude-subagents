@@ -35,7 +35,11 @@ cat > "$T/bin/herdr" <<'FAKE'
 #!/usr/bin/env bash
 { printf '%s\n' "$@"; echo '--end--'; } >> "$FAKE_LOG"
 case "$1 $2" in
-  "tab list")   echo '{"result":{"tabs":[]}}' ;;
+  "tab list")   echo "${FAKE_TABS:-{\"result\":{\"tabs\":[]}\}}" ;;
+  "pane list")  echo "${FAKE_PANES:-{\"result\":{\"panes\":[]}\}}" ;;
+  "agent list") echo "${FAKE_AGENTS:-{\"result\":{\"agents\":[]}\}}" ;;
+  "agent rename") [ -z "${FAKE_RENAME_FAIL:-}" ] || exit 1 ;;
+  "agent start") [ -z "${FAKE_START_FAIL:-}" ] || { [ -e "$FAKE_LOG.started" ] || { touch "$FAKE_LOG.started"; exit 1; }; } ;;
   "tab create") echo '{"result":{"tab":{"tab_id":"w0:t9"},"root_pane":{"pane_id":"w0:p9"}}}' ;;
   "agent get")
     case "$3" in
@@ -51,6 +55,7 @@ printf '{\n  "projects": {\n    "%s": {\n      "hasTrustDialogAccepted": true\n 
 spawn() { # <log> <spawner args...>
   local log="$1"; shift; : > "$log"
   env PATH="$T/bin:$PATH" FAKE_LOG="$log" CLAUDE_CONFIG_DIR="$T/cfg" HERDR_ENV=1 \
+    XDG_STATE_HOME="$T/state" \
     HERDR_WORKSPACE_ID=w0 HERDR_PANE_ID=w0:p1 \
     bash "$ROOT/scripts/herdr-spawn.sh" "$@" --cwd "$ROOT" >/dev/null 2>"$log.err"
 }
@@ -105,6 +110,13 @@ import json,sys; a=json.load(sys.stdin)[\"hcs-test-wl\"]
 assert a[\"tools\"]==[\"Read\",\"Bash\",\"SendMessage\"], a
 assert a[\"model\"]==\"sonnet\" and a[\"description\"]==\"Has: a colon\", a
 assert a[\"prompt\"]==\"Line \\\"one\\\"\n\tTabbed \\\\ slash\", repr(a[\"prompt\"])"' _ "$(agents_arg "$T/g")"
+printf -- '---\nname: hcs-test-uni\ndescription: a — b “q” 🦀\ntools: Read\n---\nx — y\n' > "$T/cfg/agents/uni.md"
+spawn "$T/g2" uni --task t1 --orchestrator boss -- --agent hcs-test-uni
+expect "--agents JSON is pure ASCII and round-trips non-ASCII" bash -c '
+  printf "%s" "$1" | LC_ALL=C grep -q "[^ -~]" && exit 1
+  printf "%s" "$1" | python3 -I -c "
+import json,sys; a=json.load(sys.stdin)[\"hcs-test-uni\"]
+assert a[\"description\"]==\"a — b “q” \U0001f980\", a; assert a[\"prompt\"]==\"x — y\", a"' _ "$(agents_arg "$T/g2")"
 spawn "$T/h" all --task t1 --orchestrator boss -- --agent hcs-test-all
 expect "--agent without a whitelist is left alone" bash -c '! grep -qx -- --agents "$1" && test ! -s "$1.err"' _ "$T/h"
 spawn "$T/i" has --task t1 --orchestrator boss -- --agent=hcs-test-has
@@ -137,6 +149,123 @@ expect "nested repo under a trusted dir is refused" refused_untrusted "$T/outer/
 expect "linked worktree of a trusted repo is trusted" trust_try "$T/wt"
 trusted_with_imports() { trust_try "$1" --trust && grep -q "external CLAUDE.md imports approved" "$T/tt.err"; }
 expect "--trust also approves external imports" trusted_with_imports "$T/outer/inner"
+
+# Orchestrator naming: the caller's pane gets the peer name as its Herdr name, lowercased
+# because Herdr refuses uppercase ("LaneB" -> invalid_agent_name, observed 2026-10-24).
+export -f call
+spawn "$T/m" kid --task t1 --orchestrator LaneB
+expect "orchestrator pane renamed to a Herdr-safe name" \
+  bash -c '[ "$(call "$1" agent rename | tr "\n" " ")" = "w0:p1 laneb " ]' _ "$T/m"
+expect "no --orchestrator, no rename" bash -c '! grep -qx rename "$1"' _ "$T/c"
+expect "the child's pane and --name never take the orchestrator's name" bash -c '
+  ! awk "/^agent\$/{a=1} a&&/^--name\$/{getline; print; exit}" "$1" | grep -qix laneb &&
+  ! grep -A1 -x rename "$1" | grep -qx w0:p9' _ "$T/m"
+spawn "$T/m2" laneb --task t1 --orchestrator LaneB
+expect "a child named like its orchestrator is refused" \
+  bash -c 'grep -q "orchestrator.s own name" "$1.err" && ! grep -qx start "$1"' _ "$T/m2"
+: > "$T/n"; env PATH="$T/bin:$PATH" FAKE_LOG="$T/n" FAKE_RENAME_FAIL=1 CLAUDE_CONFIG_DIR="$T/cfg" \
+  HERDR_ENV=1 HERDR_WORKSPACE_ID=w0 HERDR_PANE_ID=w0:p1 XDG_STATE_HOME="$T/state" \
+  bash "$ROOT/scripts/herdr-spawn.sh" kid --task t1 --orchestrator boss --cwd "$ROOT" >/dev/null 2>"$T/n.err"
+expect "a refused rename only warns" bash -c 'grep -q "could not name pane" "$1.err" && grep -qx start "$1"' _ "$T/n"
+
+# A first `agent start` that fails (the shell-typing race) is retried once after Ctrl-C.
+: > "$T/v"; env PATH="$T/bin:$PATH" FAKE_LOG="$T/v" FAKE_START_FAIL=1 CLAUDE_CONFIG_DIR="$T/cfg" \
+  HERDR_ENV=1 HERDR_WORKSPACE_ID=w0 HERDR_PANE_ID=w0:p1 XDG_STATE_HOME="$T/state" \
+  bash "$ROOT/scripts/herdr-spawn.sh" retry --task t1 --cwd "$ROOT" >/dev/null 2>"$T/v.err"
+expect "a failed agent start is retried once after C-c" bash -c '
+  [ "$(grep -cx start "$1")" = 2 ] && grep -A2 -x send-keys "$1" | grep -qx C-c && grep -q retrying "$1.err"' _ "$T/v"
+
+# Report hook injection: --settings names hooks/team-report.sh for PostToolUse(SendMessage)
+# and Stop, and the pane env names the report file.
+settings_arg() { awk '/^agent$/{a=1} a&&p{print; exit} a&&/^--settings$/{p=1}' "$1"; }
+expect "--settings injects the report hook" bash -c 'python3 -I -c "
+import json,sys; s=json.load(sys.stdin)[\"hooks\"]
+assert s[\"PostToolUse\"][0][\"matcher\"]==\"SendMessage\", s
+for e in (\"PostToolUse\",\"Stop\"): assert s[e][0][\"hooks\"][0][\"command\"]==\"bash \\\"$2/hooks/team-report.sh\\\"\", s" < "$1"' _ "$(settings_arg "$T/a")" "$ROOT"
+expect "settings file sits beside the report" bash -c '[ "$1" = "$2/state/herdr-spawn/t1/reviewer.settings.json" ]' _ "$(settings_arg "$T/a")" "$T"
+expect "pane env carries CC_TEAM_REPORT_FILE" grep -qx "CC_TEAM_REPORT_FILE=$T/state/herdr-spawn/t1/reviewer.md" "$T/a"
+expect "no --oneshot, no CC_TEAM_ONESHOT" bash -c '! grep -q CC_TEAM_ONESHOT "$1"' _ "$T/a"
+spawn "$T/o" one --task t1 --oneshot
+expect "--oneshot sets CC_TEAM_ONESHOT=1" grep -qx CC_TEAM_ONESHOT=1 "$T/o"
+spawn "$T/p" own --task t1 -- --settings '{"x":1}'
+expect "caller's --settings wins, with a warning" \
+  bash -c '[ "$(grep -cx -- --settings "$1")" = 1 ] && grep -q "no FINAL report hook" "$1.err"' _ "$T/p"
+mkdir -p "$T/state/herdr-spawn/t1" && echo stale > "$T/state/herdr-spawn/t1/fresh.md"
+spawn "$T/q" fresh --task t1
+expect "spawn removes a stale report of the same name" test ! -e "$T/state/herdr-spawn/t1/fresh.md"
+
+# The hook itself. Always exit 0; writes only on a FINAL.
+RHOOK="$ROOT/hooks/team-report.sh"
+RF="$T/state/herdr-spawn/t2/kid.md"
+hook_run() { # <log> <payload> [env...]  → hook exit status
+  local log="$1" p="$2"; shift 2; : > "$log"
+  printf '%s' "$p" | env PATH="$T/bin:$PATH" FAKE_LOG="$log" HERDR_ENV=1 HERDR_PANE_ID=w0:p7 \
+    CC_TEAM_REPORT_FILE="$RF" CC_TEAM_AGENT=kid CC_TEAM_TASK=t2 CC_TEAM_ORCHESTRATOR=boss \
+    CC_TEAM_ORCHESTRATOR_PANE=w0:p1 "$@" bash "$RHOOK"
+}
+ptu() { printf '{"session_id":"s-1","hook_event_name":"PostToolUse","tool_name":"%s","tool_input":{"to":"boss","message":"%s"},"tool_response":{"message":"sent"}}' "$1" "$2"; }
+hook_run "$T/r1" "$(ptu SendMessage 'just a question')"
+expect "non-FINAL SendMessage writes nothing" test ! -e "$RF"
+hook_run "$T/r1" "$(ptu Bash 'FINAL: no')"
+expect "other tools write nothing" test ! -e "$RF"
+hook_run "$T/r2" "$(ptu SendMessage 'FINAL: all \"done\"\nline two')"
+expect "FINAL SendMessage saves the report with its session" \
+  bash -c 'grep -qx "session_id: s-1" "$1" && grep -qx "source: SendMessage" "$1" && grep -qx "FINAL: all \"done\"" "$1" && grep -qx "line two" "$1"' _ "$RF"
+expect "report notifies the orchestrator pane" \
+  bash -c '[ "$(call "$1" pane report-metadata | head -1)" = w0:p1 ] && grep -qx "last_report=kid" "$1" && [ "$(call "$1" notification show | grep -A1 -x -- --sound | tail -1)" = none ]' _ "$T/r2"
+hook_run "$T/r2b" '{"session_id":"s-1","hook_event_name":"Stop","last_assistant_message":"FINAL: sent it"}'
+expect "a Stop echo never overwrites the SendMessage report" \
+  bash -c 'grep -qx "source: SendMessage" "$1" && grep -qx "line two" "$1"' _ "$RF"
+rm -f "$RF"
+hook_run "$T/r3" '{"session_id":"s-2","hook_event_name":"Stop","last_assistant_message":"  FINAL: by Stop"}'
+expect "Stop with a FINAL last message saves it" \
+  bash -c 'grep -qx "source: Stop" "$1" && grep -qx "session_id: s-2" "$1"' _ "$RF"
+rm -f "$RF"
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"FINAL: old"}]}}' \
+  '{"type":"user","message":{"content":"more"}}' \
+  '{"type":"assistant","message":{"content":[{"type":"text","text":"FINAL: from transcript"}]}}' > "$T/tr.jsonl"
+hook_run "$T/r4" "{\"session_id\":\"s-3\",\"hook_event_name\":\"Stop\",\"transcript_path\":\"$T/tr.jsonl\"}"
+expect "Stop falls back to the transcript's last text" grep -qx "FINAL: from transcript" "$RF"
+rm -f "$RF"
+hook_run "$T/r5" '{"session_id":"s-4","hook_event_name":"Stop","last_assistant_message":"Waiting for your answer."}'
+expect "Stop without FINAL writes nothing" test ! -e "$RF"
+expect "hook without CC_TEAM_REPORT_FILE exits 0" \
+  bash -c 'printf "{\"hook_event_name\":\"Stop\"}" | env -u CC_TEAM_REPORT_FILE bash "$1"' _ "$RHOOK"
+expect "hook with an unwritable report path exits 0" \
+  bash -c 'printf "%s" "$1" | CC_TEAM_REPORT_FILE=/proc/nope/x.md bash "$2"' _ "$(ptu SendMessage 'FINAL: x')" "$RHOOK"
+# --oneshot: after the report lands, Stop closes the child's own pane (delay 0 for the test).
+hook_run "$T/r6" "$(ptu SendMessage 'FINAL: one')" >/dev/null
+hook_run "$T/r6" '{"session_id":"s-1","hook_event_name":"Stop","last_assistant_message":"sent"}' CC_TEAM_ONESHOT=1 CC_TEAM_ONESHOT_DELAY=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do grep -qx close "$T/r6" && break; sleep 0.2; done
+expect "--oneshot closes its own pane once reported" bash -c '[ "$(call "$1" pane close)" = w0:p7 ]' _ "$T/r6"
+hook_run "$T/r7" '{"session_id":"s-other","hook_event_name":"Stop","last_assistant_message":"hi"}' CC_TEAM_ONESHOT=1 CC_TEAM_ONESHOT_DELAY=0
+sleep 0.5
+expect "--oneshot leaves the pane when the report is another session's" bash -c '! grep -qx close "$1"' _ "$T/r7"
+
+# --reap: closes only idle/done panes whose report exists and matches the pane's session.
+RD="$T/state/herdr-spawn/tr"; mkdir -p "$RD"
+for n in a c; do printf -- '---\nsession_id: sess-%s\n---\nFINAL: x\n' "$n" > "$RD/$n.md"; done
+printf -- '---\nsession_id: sess-old\n---\nFINAL: x\n' > "$RD/d.md"
+ag() { printf '{"agent":"claude","agent_session":{"kind":"id","value":"sess-%s"},"agent_status":"%s","name":"%s","pane_id":"w0:p%s","tab_id":"w0:t5"}' "$1" "$2" "$1" "$3"; }
+AGENTS="{\"result\":{\"agents\":[$(ag a idle 2),$(ag b idle 3),$(ag c working 4),$(ag d done 5),{\"agent\":\"claude\",\"agent_status\":\"idle\",\"pane_id\":\"w0:p1\",\"tab_id\":\"w0:t5\"}]}}"
+PANES='{"result":{"panes":[{"pane_id":"w0:p1","tab_id":"w0:t5"},{"pane_id":"w0:p2","tab_id":"w0:t5"},{"pane_id":"w0:p3","tab_id":"w0:t5"},{"pane_id":"w0:p4","tab_id":"w0:t5"},{"pane_id":"w0:p5","tab_id":"w0:t5"},{"pane_id":"w0:p6","tab_id":"w0:t5"},{"pane_id":"w0:p8","tab_id":"w0:t0"}]}}'
+: > "$T/s"
+env PATH="$T/bin:$PATH" FAKE_LOG="$T/s" HERDR_ENV=1 HERDR_WORKSPACE_ID=w0 HERDR_PANE_ID=w0:p1 \
+  XDG_STATE_HOME="$T/state" FAKE_AGENTS="$AGENTS" FAKE_PANES="$PANES" \
+  FAKE_TABS='{"result":{"tabs":[{"label":"tr","tab_id":"w0:t5"}]}}' \
+  bash "$ROOT/scripts/herdr-spawn.sh" --reap tr > "$T/s.out" 2>"$T/s.err"
+expect "--reap closes exactly the reported, settled pane" \
+  bash -c '[ "$(grep -A1 -x close "$1" | grep -v -x -e close -e -- | tr "\n" " ")" = "w0:p2 " ]' _ "$T/s"
+expect "--reap explains every skip" bash -c '
+  grep -q "^closed  w0:p2 a" "$1" && grep -q "^skipped w0:p1 - (this pane)" "$1" &&
+  grep -q "^skipped w0:p3 b (no report at" "$1" && grep -q "^skipped w0:p4 c (agent is working)" "$1" &&
+  grep -q "^skipped w0:p5 d (report in .* is from another session" "$1" &&
+  grep -q "^skipped w0:p6 - (no agent in pane)" "$1" && ! grep -q w0:p8 "$1" &&
+  grep -q "\"closed\":1,\"skipped\":5" "$1"' _ "$T/s.out"
+: > "$T/u"
+env PATH="$T/bin:$PATH" FAKE_LOG="$T/u" HERDR_ENV=1 HERDR_WORKSPACE_ID=w0 HERDR_PANE_ID=w0:p1 \
+  bash "$ROOT/scripts/herdr-spawn.sh" --reap nosuch >/dev/null 2>"$T/u.err"
+expect "--reap on an unknown task fails" bash -c 'grep -q "no tab labelled" "$1.err" && ! grep -qx close "$1"' _ "$T/u"
 
 for f in "$ROOT"/hooks/*.sh "$ROOT"/scripts/*.sh; do
   bash -n "$f" && echo "ok   syntax $(basename "$f")" || { echo "FAIL syntax $f"; fail=1; }

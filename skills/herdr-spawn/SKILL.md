@@ -60,14 +60,19 @@ Useful options:
 | `--cwd <path>` | a different directory, e.g. a worktree of its own |
 | `--trust` | the `--cwd` has not been trusted yet and you would answer yes — see trust below |
 | `--wait --timeout <ms>` | you want the spawn call to block until the first turn settles |
+| `--oneshot` | a fire-and-forget child: it closes its own pane once its FINAL report is saved |
 | `--dry-run` | print the herdr commands without running them |
 | `-- <claude args...>` | passed to `claude` verbatim — see permission mode below |
 
 The spawner also labels the panes for Herdr's agent panel: each child shows its own name with
-`$under` = "↳ <orchestrator>", and your pane shows your name. The README has the layout.
+`$under` = "↳ <orchestrator>", and your pane shows your name. It also renames your pane in
+Herdr (`herdr agent rename`), so `herdr agent list` shows your name instead of `null`.
+Herdr names must be `[a-z][a-z0-9_-]`, so `LaneB` becomes `laneb` there; the peer name used by
+SendMessage is unchanged. Every spawn re-applies it, so after a resume renames you, pass the
+new name and your pane follows. A child may not take your name (the spawner refuses).
 
 Every spawned pane receives `CC_TEAM_TASK`, `CC_TEAM_AGENT`, `CC_TEAM_ORCHESTRATOR`,
-`CC_TEAM_ORCHESTRATOR_PANE` and `CC_TEAM_ORCHESTRATOR_SESSION_AT_START`.
+`CC_TEAM_ORCHESTRATOR_PANE`, `CC_TEAM_ORCHESTRATOR_SESSION_AT_START` and `CC_TEAM_REPORT_FILE`.
 
 The return path is automatic when you pass `--orchestrator`: the spawner appends a standing
 instruction to the child's system prompt (`--append-system-prompt`) telling it to send results
@@ -162,19 +167,37 @@ A peer's permissions are its own: never route work a hook or a denial blocked in
 through a spawned agent. That is permission laundering, and the answer is to go back to the
 operator.
 
-## Tear down
+## Collect
 
-A child starts its last report with `FINAL:` (the return path tells it to). When one arrives
-and you need nothing more from that child, close it:
+A child starts its last report with `FINAL:` (the return path tells it to). The spawner
+injects `hooks/team-report.sh` into every child (`claude --settings`), which saves that
+report, whether it went out by SendMessage or was just the child's last words, to
 
-```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-spawn.sh" reviewer --close
+```
+${XDG_STATE_HOME:-~/.local/state}/herdr-spawn/<task>/<name>.md   # front matter: session_id, source, written
 ```
 
-That closes its pane, which removes its row from Herdr's agent panel, and Herdr drops the
-tab with its last pane. Herdr's `done` status is not a signal for this: it means one turn
-ended, including a child that is waiting for your answer. To end a whole team at once, close
-its tab with `herdr tab close <tab id>`.
+and puts a ✓ (`$report`) on the child's pane plus a Herdr notification. **The file is the source
+of truth.** If a SendMessage FINAL got cut off in your context, or never came, read the file
+rather than the pane's scrollback (which truncates) or the session's jsonl.
+
+## Tear down: spawn → collect → reap
+
+When the reports are in and you need nothing more from the team:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-spawn.sh" --reap review-auth
+# closed  w7:p3 reviewer (report: ~/.local/state/herdr-spawn/review-auth/reviewer.md)
+# skipped w7:p4 tester (no report at ...)
+# {"task":"review-auth","tab_id":"w7:t4","closed":1,"skipped":1}
+```
+
+`--reap` closes a pane only when its agent is `idle`/`done` **and** a report from that pane's
+own session exists. It never closes your pane, and it says why it skipped each one. Run it
+again after the stragglers report. To close one child by hand, `herdr-spawn.sh reviewer
+--close`. Herdr's `done` status alone is not a signal: it fires after every turn, including a
+child that is waiting for your answer. Closing a pane removes its row from Herdr's agent
+panel, and Herdr drops the tab with its last pane.
 
 Do this when the task is done — live agent names are unique, so a forgotten `reviewer` blocks
 the next one. Never close a tab, pane or workspace you did not create.
