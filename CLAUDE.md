@@ -14,6 +14,13 @@
   spawner appends a SendMessage-back instruction via `--append-system-prompt` (merging into a
   caller's own, since claude takes one value). Herdr passes it as a single argv element —
   verified 2026-10-23 with a live haiku probe that reported back unprompted.
+- **`--agent` + a `tools:` whitelist strips SendMessage** (observed 2026-10-24: a ux-designer
+  child typed its FINAL into the orchestrator's prompt via `herdr agent prompt`). With
+  `--orchestrator`, the spawner re-emits the agent via `--agents` (which beats `.claude/agents`;
+  verified with claude 2.1.310) with SendMessage appended. The frontmatter parser is awk and
+  handles only scalars, `[a, b]`/`- a` lists and `|`/`>` blocks; anything else warns, unchanged.
+  Its JSON escaper loops over characters on purpose: backslashes in a gsub replacement differ
+  between awks.
 - **Sidebar tags are display-only pane metadata** (`herdr pane report-metadata --source
   herdr-spawn`): `--display-agent` on both ends (the built-in `agent` token says "claude" for
   every Claude pane), `$team`/`$parent`/`$under` on the child. `$under` carries "↳ " because

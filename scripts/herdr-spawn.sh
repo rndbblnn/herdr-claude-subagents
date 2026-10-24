@@ -428,6 +428,109 @@ if [ -n "$orchestrator" ]; then
   [ "$merged" = yes ] || claude_args+=(--append-system-prompt "$return_path")
 fi
 
+# The return path needs SendMessage, and `-- --agent <name>` limits the child to that agent's
+# `tools:` whitelist, which seldom names it. Observed 2026-10-24: a ux-designer child
+# (tools: Read, Write, Edit, Bash, Grep, Glob, Skill) had no SendMessage and typed its FINAL
+# into the orchestrator's prompt with `herdr agent prompt`, where it read as operator input.
+# `--agents <json>` defines an agent for one session and wins over the same name in
+# .claude/agents (verified 2026-10-24, claude 2.1.310), so the spawner re-emits the agent
+# with SendMessage added to its whitelist. Everything else about the agent is unchanged.
+# Only the simple frontmatter forms are parsed (scalars, [a, b] and "- a" lists, | and >
+# blocks). Anything else (hooks, mcpServers, maps) leaves the agent as it was, with a warning.
+agent_file() { # <name>: the .md whose frontmatter `name:` matches, project dirs first
+  local d="$cwd" f dirs=()
+  while :; do
+    dirs+=("$d/.claude/agents")
+    [ "$d" = / ] || [ -z "$d" ] && break
+    d=$(dirname -- "$d")
+  done
+  dirs+=("${CLAUDE_CONFIG_DIR:-$HOME/.claude}/agents")
+  for d in "${dirs[@]}"; do
+    [ -d "$d" ] || continue
+    for f in "$d"/*.md; do
+      [ -r "$f" ] || continue
+      awk -v n="$1" 'NR==1&&!/^---[ \t]*$/{exit 1} NR==1{next} /^---[ \t]*$/{exit 1}
+        /^name:/{v=$0; sub(/^name:[ \t]*/,"",v); gsub(/^["'\'']|["'\''][ \t]*$|[ \t]+$/,"",v); exit (v==n?0:1)}' "$f" \
+        && { printf '%s\n' "$f"; return 0; }
+    done
+  done
+  return 1
+}
+
+# Prints {"<name>":{...}} with <tool> appended to `tools:`, or nothing when no rewrite is
+# needed (no whitelist, or the tool is already on it). Exits 2 on a form it does not parse.
+agent_json_with_tool() { # <file> <name> <tool>
+  awk -v name="$2" -v tool="$3" '
+    function esc(s,   o,i,c) { o=""; for (i=1;i<=length(s);i++) { c=substr(s,i,1)
+        if (c=="\\") o=o "\\\\"; else if (c=="\"") o=o "\\\""; else if (c=="\t") o=o "\\t"
+        else if (c=="\n") o=o "\\n"; else if (c!="\r") o=o c }; return o }
+    function bad() { broken=1; exit }
+    function unq(s) { sub(/^[ \t]+/,"",s); sub(/[ \t]+$/,"",s)
+      if (s ~ /^".*"$/ || s ~ /^'\''.*'\''$/) s=substr(s,2,length(s)-2); return s }
+    function flow(s,   n,i,a,out) { s=substr(s,2,length(s)-2); n=split(s,a,",")
+      for (i=1;i<=n;i++) if (unq(a[i])!="") out=out SUBSEP unq(a[i]); return substr(out,2) }
+    function close_block() { if (bkey!="") { val[bkey]=bbuf; bkey="" } }
+    NR==1 { if ($0 !~ /^---[ \t]*$/) bad(); fm=1; next }
+    fm && /^---[ \t]*$/ { close_block(); if (lkey!="") lkey=""; fm=0; body=1; next }
+    fm {
+      if (bkey!="") { if ($0 ~ /^[ \t]/ || $0=="") { l=$0; sub(/^[ \t]+/,"",l)
+          bbuf = bbuf=="" ? l : bbuf (bstyle=="|" ? "\n" : " ") l; next } close_block() }
+      if (lkey!="") { if ($0 ~ /^[ \t]*-[ \t]/) { l=$0; sub(/^[ \t]*-[ \t]*/,"",l)
+          lst[lkey] = lst[lkey]=="" ? unq(l) : lst[lkey] SUBSEP unq(l); next } lkey="" }
+      if ($0 ~ /^[ \t]*(#|$)/) next
+      if ($0 !~ /^[A-Za-z][A-Za-z0-9_-]*:/) bad()
+      k=$0; sub(/:.*/,"",k); v=$0; sub(/^[^:]*:[ \t]*/,"",v)
+      if (v ~ /^[|>][-+]?[ \t]*$/) { bkey=k; bbuf=""; bstyle=substr(v,1,1); next }
+      if (v=="") { lkey=k; lst[k]=""; islist[k]=1; next }
+      if (v ~ /^\[.*\]$/) { lst[k]=flow(v); islist[k]=1; next }
+      if (v ~ /^[\[{]/) bad()
+      val[k]=unq(v); next
+    }
+    body { prompt = started ? prompt "\n" $0 : $0; started=1 }
+    END {
+      if (broken) exit 2
+      if (fm || !body) exit 2
+      for (k in val) if (k !~ /^(name|description|model|color|permissionMode|effort|maxTurns)$/) exit 2
+      for (k in islist) if (k !~ /^(tools|disallowedTools|skills)$/) exit 2
+      if (!islist["tools"] && val["tools"]=="") exit 0          # no whitelist: inherits all
+      t = islist["tools"] ? lst["tools"] : val["tools"]
+      if (!islist["tools"]) gsub(/[ \t]*,[ \t]*/,SUBSEP,t)
+      n=split(t,ts,SUBSEP); for (i=1;i<=n;i++) if (ts[i]==tool) exit 0
+      lst["tools"] = t=="" ? tool : t SUBSEP tool; islist["tools"]=1; delete val["tools"]
+      sub(/^\n+/,"",prompt)
+      out = "\"description\":\"" esc(val["description"]) "\",\"prompt\":\"" esc(prompt) "\""
+      for (k in val) if (k!="name" && k!="description")
+        out = out ",\"" k "\":" (k=="maxTurns" && val[k] ~ /^[0-9]+$/ ? val[k] : "\"" esc(val[k]) "\"")
+      for (k in islist) { n=split(lst[k],ts,SUBSEP); a=""
+        for (i=1;i<=n;i++) a = a (i>1?",":"") "\"" esc(ts[i]) "\""
+        out = out ",\"" k "\":[" a "]" }
+      printf "{\"%s\":{%s}}\n", esc(name), out
+    }' "$1"
+}
+
+if [ -n "$orchestrator" ]; then
+  agent_name=""; has_agents=no
+  for i in ${claude_args[@]+"${!claude_args[@]}"}; do
+    case "${claude_args[$i]}" in
+      --agent)   agent_name="${claude_args[i+1]-}" ;;
+      --agent=*) agent_name="${claude_args[i]#--agent=}" ;;
+      --agents|--agents=*) has_agents=yes ;;
+    esac
+  done
+  if [ -n "$agent_name" ]; then
+    warn_no_return() { printf '%s: warning: %s; the child may lack SendMessage and be unable to report back\n' "$SELF" "$1" >&2; }
+    if [ "$has_agents" = yes ]; then
+      warn_no_return "--agents was passed, so agent '$agent_name' is left as given"
+    elif ! af=$(agent_file "$agent_name"); then
+      warn_no_return "no .claude/agents file defines '$agent_name' (plugin agents are not rewritten)"
+    elif agent_json=$(agent_json_with_tool "$af" "$agent_name" SendMessage); then
+      [ -z "$agent_json" ] || claude_args+=(--agents "$agent_json")
+    else
+      warn_no_return "$af uses frontmatter this script does not parse"
+    fi
+  fi
+fi
+
 # --name sets the Claude Code peer name that SendMessage addresses; --session-id pins the
 # uuid that `herdr agent list` reports back as agent_session.value. Native claude flags only
 # after `--`, per the herdr skill.
