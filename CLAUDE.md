@@ -21,6 +21,12 @@
   handles only scalars, `[a, b]`/`- a` lists and `|`/`>` blocks; anything else warns, unchanged.
   Its JSON escaper loops over characters on purpose: backslashes in a gsub replacement differ
   between awks.
+- **Trust follows git (2026-10-24).** A submodule inside a trusted worktree stopped on the trust
+  dialog (Claude recorded the submodule's own path), while a linked worktree of a trusted repo
+  with no entry came up clean. The preflight counts entries between the cwd and its git
+  toplevel, plus the main checkout's root for a linked worktree. `--trust` also sets
+  `hasClaudeMdExternalIncludesApproved`: an engine repo whose CLAUDE.md @-imports a sibling
+  showed that dialog right after trust was accepted.
 - **Sidebar tags are display-only pane metadata** (`herdr pane report-metadata --source
   herdr-spawn`): `--display-agent` on both ends (the built-in `agent` token says "claude" for
   every Claude pane), `$team`/`$parent`/`$under` on the child. `$under` carries "↳ " because

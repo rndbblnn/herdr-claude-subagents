@@ -127,9 +127,12 @@ herdr-spawn: herdr agent start failed for 'x' in pane w7:pM
 which names a pane, not a cause. `herdr pane read w7:pM` shows the dialog.
 
 `herdr-spawn.sh` now checks this before it creates a tab or a pane, so a refusal costs
-nothing and says which path it could not find. Trust covers descendants: a worktree beneath
-an already-trusted repo is fine, a `--cwd` outside one is not. Pass `--trust` to record the
-directory and spawn anyway — only for a directory you would have said yes to yourself.
+nothing and says which path it could not find. Trust follows git, not folders: a subdirectory
+of a trusted repo is fine, and so is a linked worktree of one, but a nested repo (a submodule
+checked out inside a trusted worktree) needs its own entry even though its parent is trusted.
+Pass `--trust` to record the directory and spawn anyway — only for a directory you would have
+said yes to yourself. `--trust` also pre-approves the second dialog, about CLAUDE.md
+`@`-imports from outside the project, which otherwise stalls the spawn the same way.
 
 Keys are case-sensitive path strings, so one folder can hold two entries with two different
 answers (`d:/…` untrusted beside `D:/…` trusted) that look identical when you read them. The
