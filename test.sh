@@ -117,6 +117,27 @@ expect "no --orchestrator, no --agents rewrite" bash -c '! grep -qx -- --agents 
 spawn "$T/l" ghost2 --task t1 --orchestrator boss -- --agent hcs-test-missing
 expect "unknown --agent warns" bash -c 'grep -q "no .claude/agents file" "$1.err" && grep -qx start "$1"' _ "$T/l"
 
+# Trust follows git: a nested repo under a trusted dir is NOT trusted, a linked worktree of a
+# trusted repo IS (both observed live 2026-10-24). --dry-run still runs the trust preflight.
+G=(git -c user.name=t -c user.email=t@t -c init.defaultBranch=main)
+"${G[@]}" init -q "$T/outer" && "${G[@]}" -C "$T/outer" commit -q --allow-empty -m init
+mkdir -p "$T/outer/sub" && "${G[@]}" init -q "$T/outer/inner"
+"${G[@]}" -C "$T/outer" worktree add -q "$T/wt" 2>/dev/null
+mkdir -p "$T/cfg2"
+printf '{\n  "projects": {\n    "%s": {\n      "hasTrustDialogAccepted": true\n    }\n  }\n}\n' "$T/outer" > "$T/cfg2/.claude.json"
+trust_try() { # <cwd> [extra args] → exit status of a dry-run spawn; stderr in $T/tt.err
+  local dir="$1"; shift
+  env PATH="$T/bin:$PATH" FAKE_LOG="$T/tt" CLAUDE_CONFIG_DIR="$T/cfg2" HERDR_ENV=1 \
+    HERDR_WORKSPACE_ID=w0 HERDR_PANE_ID=w0:p1 \
+    bash "$ROOT/scripts/herdr-spawn.sh" tt --task t1 --dry-run --cwd "$dir" "$@" >/dev/null 2>"$T/tt.err"
+}
+expect "subdir of a trusted repo is trusted"        trust_try "$T/outer/sub"
+refused_untrusted() { ! trust_try "$1" && grep -q "has not been trusted" "$T/tt.err"; }
+expect "nested repo under a trusted dir is refused" refused_untrusted "$T/outer/inner"
+expect "linked worktree of a trusted repo is trusted" trust_try "$T/wt"
+trusted_with_imports() { trust_try "$1" --trust && grep -q "external CLAUDE.md imports approved" "$T/tt.err"; }
+expect "--trust also approves external imports" trusted_with_imports "$T/outer/inner"
+
 for f in "$ROOT"/hooks/*.sh "$ROOT"/scripts/*.sh; do
   bash -n "$f" && echo "ok   syntax $(basename "$f")" || { echo "FAIL syntax $f"; fail=1; }
 done

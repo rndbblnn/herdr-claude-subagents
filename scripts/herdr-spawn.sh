@@ -273,9 +273,14 @@ done
 #
 # Observed 2026-09-10: spawning with --cwd into a fresh temp directory produced
 #   herdr-spawn: herdr agent start failed for 'newdirprobe' in pane w7:pM
-# with the trust dialog on screen in that pane. Spawns into an already-trusted repo, and into
-# a worktree beneath it that had no entry of its own, both came up clean — trust covers
-# descendants, so the check below does too.
+# with the trust dialog on screen in that pane.
+#
+# Trust does NOT simply cover descendants. Observed 2026-10-24 (claude 2.1.310): a submodule
+# checked out inside a trusted worktree stopped on the dialog, and accepting it recorded the
+# submodule's own path. Meanwhile a linked worktree of a trusted repo, with no entry of its
+# own, came up clean. So the check follows git: an entry counts if it sits between the cwd
+# and its git toplevel (a nested repo is a new boundary), or is the main checkout's root when
+# the cwd is a linked worktree. Outside git, any ancestor counts, as before.
 CLAUDE_CONFIG="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
 
 # Project keys are stored with forward slashes; cygpath -w handed us backslashes.
@@ -307,16 +312,37 @@ trusted_projects() {
 # someone reading them. Keys are case-sensitive strings, so one folder can appear twice —
 # a Windows machine was seen carrying "d:/code/..." (false) beside "D:/code/..." (true) — and
 # "untrusted" is a baffling thing to be told about a directory you trusted last week.
+# The roots an entry may sit at for <dir>: "<top>\t<main>" (main empty unless a linked
+# worktree), or nothing outside git.
+git_roots() {
+  command -v git >/dev/null 2>&1 || return 0
+  local top common main=""
+  top=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 0
+  common=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+  case "$common" in
+    */.git) [ "$(path_key "${common%/.git}")" = "$(path_key "$top")" ] || main="${common%/.git}" ;;
+  esac
+  printf '%s\t%s\n' "$(path_key "$top")" "$(path_key "$main")"
+}
+
 trust_state() {
-  local want lwant key lkey any=no near=no
+  local want lwant key lkey any=no near=no roots top="" main=""
   want=$(path_key "$1")
   lwant=$(lower_ascii "$want")
+  roots=$(git_roots "$1")
+  if [ -n "$roots" ]; then top="${roots%%$'\t'*}"; main="${roots#*$'\t'}"; fi
   while IFS= read -r key; do
     key=$(path_key "$key")
     [ -n "$key" ] || continue
     any=yes
+    if [ -n "$main" ] && [ "$key" = "$main" ]; then printf 'trusted\n'; return; fi
     case "$want" in
-      "$key"|"$key"/*) printf 'trusted\n'; return ;;
+      "$key"|"$key"/*)
+        # Inside git, an entry above the toplevel is a different repo's answer.
+        if [ -n "$top" ]; then
+          case "$key" in "$top"|"$top"/*) ;; *) continue ;; esac
+        fi
+        printf 'trusted\n'; return ;;
     esac
     lkey=$(lower_ascii "$key")
     case "$lwant" in
@@ -340,7 +366,7 @@ EOF
 grant_trust() {
   local key="$1"
   if [ "$dry_run" = yes ]; then
-    printf '+ record %s as trusted in %s\n' "$key" "$CLAUDE_CONFIG" >&2
+    printf '+ record %s as trusted (and its external CLAUDE.md imports approved) in %s\n' "$key" "$CLAUDE_CONFIG" >&2
     return 0
   fi
   command -v node >/dev/null 2>&1 \
@@ -350,7 +376,13 @@ grant_trust() {
     const file = process.argv[1], key = process.argv[2];
     const conf = JSON.parse(fs.readFileSync(file, "utf8"));
     conf.projects = conf.projects || {};
-    conf.projects[key] = Object.assign({}, conf.projects[key], { hasTrustDialogAccepted: true });
+    // The external-imports dialog comes next when CLAUDE.md @-imports files outside the
+    // project; left unanswered it stalls the spawn just like the trust dialog (2026-10-24).
+    conf.projects[key] = Object.assign({}, conf.projects[key], {
+      hasTrustDialogAccepted: true,
+      hasClaudeMdExternalIncludesApproved: true,
+      hasClaudeMdExternalIncludesWarningShown: true,
+    });
     const tmp = file + ".herdr-spawn.tmp";
     fs.writeFileSync(tmp, JSON.stringify(conf, null, 2) + "\n");
     fs.renameSync(tmp, file);
