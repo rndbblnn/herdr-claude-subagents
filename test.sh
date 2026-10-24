@@ -89,6 +89,34 @@ expect "--close refuses this pane" bash -c 'test -s "$1.err" && ! grep -qx close
 spawn "$T/f" ghost --close
 expect "--close on an unknown agent fails" bash -c 'test -s "$1.err" && ! grep -qx close "$1"' _ "$T/f"
 
+# --agent with a tools whitelist: the spawner re-emits it via --agents with SendMessage added.
+# User-level agents dir = $CLAUDE_CONFIG_DIR/agents; names are unique so no real agent matches.
+mkdir -p "$T/cfg/agents"
+printf -- '---\nname: hcs-test-wl\ndescription: "Has: a colon"\ntools: [Read, Bash]\nmodel: sonnet\n---\n\nLine "one"\n\tTabbed \\ slash\n' > "$T/cfg/agents/wl.md"
+printf -- '---\nname: hcs-test-all\ndescription: no whitelist\n---\nBody\n' > "$T/cfg/agents/all.md"
+printf -- '---\nname: hcs-test-has\ndescription: d\ntools:\n  - Read\n  - SendMessage\n---\nBody\n' > "$T/cfg/agents/has.md"
+printf -- '---\nname: hcs-test-odd\ndescription: d\ntools: [Read]\nhooks:\n  Stop: x\n---\nBody\n' > "$T/cfg/agents/odd.md"
+# The arg after --agents in the `agent start` call.
+agents_arg() { awk '/^agent$/{a=1} a&&p{print; exit} a&&/^--agents$/{p=1}' "$1"; }
+spawn "$T/g" wl --task t1 --orchestrator boss -- --agent hcs-test-wl
+expect "--agent whitelist gains SendMessage via --agents" \
+  bash -c 'printf "%s" "$1" | python3 -I -c "
+import json,sys; a=json.load(sys.stdin)[\"hcs-test-wl\"]
+assert a[\"tools\"]==[\"Read\",\"Bash\",\"SendMessage\"], a
+assert a[\"model\"]==\"sonnet\" and a[\"description\"]==\"Has: a colon\", a
+assert a[\"prompt\"]==\"Line \\\"one\\\"\n\tTabbed \\\\ slash\", repr(a[\"prompt\"])"' _ "$(agents_arg "$T/g")"
+spawn "$T/h" all --task t1 --orchestrator boss -- --agent hcs-test-all
+expect "--agent without a whitelist is left alone" bash -c '! grep -qx -- --agents "$1" && test ! -s "$1.err"' _ "$T/h"
+spawn "$T/i" has --task t1 --orchestrator boss -- --agent=hcs-test-has
+expect "--agent= already holding SendMessage is left alone" bash -c '! grep -qx -- --agents "$1" && test ! -s "$1.err"' _ "$T/i"
+spawn "$T/j" odd --task t1 --orchestrator boss -- --agent hcs-test-odd
+expect "unparsed frontmatter warns, spawns unchanged" \
+  bash -c '! grep -qx -- --agents "$1" && grep -q "does not parse" "$1.err" && grep -qx start "$1"' _ "$T/j"
+spawn "$T/k" wl2 --task t1 -- --agent hcs-test-wl
+expect "no --orchestrator, no --agents rewrite" bash -c '! grep -qx -- --agents "$1"' _ "$T/k"
+spawn "$T/l" ghost2 --task t1 --orchestrator boss -- --agent hcs-test-missing
+expect "unknown --agent warns" bash -c 'grep -q "no .claude/agents file" "$1.err" && grep -qx start "$1"' _ "$T/l"
+
 for f in "$ROOT"/hooks/*.sh "$ROOT"/scripts/*.sh; do
   bash -n "$f" && echo "ok   syntax $(basename "$f")" || { echo "FAIL syntax $f"; fail=1; }
 done

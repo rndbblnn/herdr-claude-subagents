@@ -76,6 +76,13 @@ repeat that in `--prompt`. Expect questions to arrive as peer messages; answer w
 ask the operator what you can't. Your own `-- --append-system-prompt` is kept, after ours.
 Without `--orchestrator` the child has no way to find you.
 
+`-- --agent <name>` limits the child to that agent's `tools:` whitelist, which usually lacks
+`SendMessage`. With `--orchestrator`, the spawner re-emits the agent through `--agents` with
+`SendMessage` added, so the return path still works; everything else about the agent is
+unchanged. It warns instead (and spawns as given) for a plugin agent, an unknown name, your own
+`--agents`, or frontmatter it can't parse (`hooks:`, `mcpServers:`, nested maps). After such a
+warning, expect the child to report by typing into your pane, or not at all.
+
 Pass `--orchestrator` from `ListAgents`, never from `$CLAUDE_CODE_SESSION_ID`. A
 `claude --resume` gives the session a new messaging identity while the environment variable and
 Herdr's `agent_session.value` both keep reporting the uuid from the original start — observed
