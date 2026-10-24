@@ -110,7 +110,8 @@ There are three moving parts:
 |---|---|---|
 | 🛑 | **The hook** (`hooks/route-agent-to-herdr.sh`) | A `PreToolUse` hook on `Agent`. **Inside Herdr only**, it blocks subagent types that can write files or run long, and points Claude to the spawner. Read-only lookups (`Explore`, `claude-code-guide`, `statusline-setup`) still run in-process. |
 | 🐑 | **The spawner** (`scripts/herdr-spawn.sh`) | Starts one named `claude` session in a pane, in the task's tab, creating the tab on first use. The Herdr agent name, the Claude peer name and the session id all match, so `herdr agent read reviewer` and `SendMessage({to: "reviewer"})` reach the same pane. The child also knows who spawned it, so it can report back. |
-| 📨 | **The return path** | With `--orchestrator`, every child gets a standing instruction in its system prompt: send results and task questions back to the parent with `SendMessage`, instead of asking in a pane nobody is watching. |
+| 📨 | **The return path** | With `--orchestrator`, every child gets a standing instruction in its system prompt: send results and task questions back to the parent with `SendMessage`, instead of asking in a pane nobody is watching. The parent's own pane takes that name in `herdr agent list`. |
+| 🧾 | **The report hook** (`hooks/team-report.sh`) | Injected into each child with `claude --settings`. When the child sends (or ends a turn with) a message starting `FINAL:`, it saves it to `~/.local/state/herdr-spawn/<task>/<name>.md`, puts a ✓ on the child's pane and raises a Herdr notification. The report survives scrollback and a failed `SendMessage`, and it is what `--reap` checks before closing a pane. |
 | 📖 | **The skill** (`skills/herdr-spawn`) | Teaches Claude how to spawn, drive and tear down a team. |
 
 ## 🎮 Drive it yourself
@@ -124,8 +125,9 @@ bash "$CLAUDE_PLUGIN_ROOT/scripts/herdr-spawn.sh" reviewer \
 
 herdr agent get reviewer      # idle | working | blocked | done
 herdr agent read reviewer     # what is it doing right now?
-bash "$CLAUDE_PLUGIN_ROOT/scripts/herdr-spawn.sh" reviewer --close   # done: pane and row go
-herdr tab close <tab id>      # tear the whole team down
+cat ~/.local/state/herdr-spawn/review-auth/reviewer.md             # its saved FINAL report
+bash "$CLAUDE_PLUGIN_ROOT/scripts/herdr-spawn.sh" --reap review-auth # close every reported, settled child
+bash "$CLAUDE_PLUGIN_ROOT/scripts/herdr-spawn.sh" reviewer --close   # or one, by hand
 ```
 
 > [!NOTE]
@@ -194,7 +196,7 @@ It asks its parent. The spawner tells every child to send task questions to the 
 <details>
 <summary><b>How do finished children leave the agent panel?</b></summary>
 <br/>
-The child starts its last report with <code>FINAL:</code>, and the parent runs <code>herdr-spawn.sh &lt;name&gt; --close</code>. That closes its pane, which removes its row, and the tab goes with its last pane. It isn't automatic on Herdr's <code>done</code> status, because that fires after every turn, including when a child is waiting for your answer.
+The child starts its last report with <code>FINAL:</code>, and a hook saves it to <code>~/.local/state/herdr-spawn/&lt;task&gt;/&lt;name&gt;.md</code>. The parent then runs <code>herdr-spawn.sh --reap &lt;task&gt;</code>, which closes every pane of that task whose agent is idle or done <i>and</i> has a saved report from its own session, and prints what it closed and skipped and why. Spawn with <code>--oneshot</code> and the child closes itself once its report is saved. Closing a pane removes its row, and the tab goes with its last pane. None of this keys on Herdr's <code>done</code> status, because that fires after every turn, including when a child is waiting for your answer.
 </details>
 
 <details>

@@ -30,6 +30,8 @@
 #   herdr-spawn.sh <name> --task <slug> [options] [-- <claude args...>]
 #   herdr-spawn.sh <name> --close     close a finished agent's pane (and its tab, if it was
 #                                     the last pane); its sidebar row goes with it
+#   herdr-spawn.sh --reap <task>      close every pane of that task whose agent is idle/done
+#                                     AND has a saved FINAL report; print closed and skipped
 #
 #   --task <slug>          tab label; the unit that groups one team           (required)
 #   --prompt <text>        submitted after the agent reports ready
@@ -42,13 +44,18 @@
 #   --env KEY=VALUE        extra env for the pane; repeatable
 #   --wait                 block until the prompt settles (idle|done|blocked)
 #   --timeout <ms>         bound for --wait                      (default 300000)
+#   --oneshot              close the child's pane by itself once its FINAL report is saved
+#                          and its turn has ended
 #   --dry-run              print the herdr commands, touch nothing
 #   --                     everything after is passed to `claude` verbatim
 #
 # Every spawned pane also receives:
 #   CC_TEAM_TASK, CC_TEAM_AGENT, CC_TEAM_ORCHESTRATOR, CC_TEAM_ORCHESTRATOR_PANE,
-#   CC_TEAM_ORCHESTRATOR_SESSION_AT_START
-# and display-only pane metadata for the sidebar: $team (the task), $parent (--orchestrator).
+#   CC_TEAM_ORCHESTRATOR_SESSION_AT_START, CC_TEAM_REPORT_FILE (+ CC_TEAM_ONESHOT=1)
+# display-only pane metadata for the sidebar: $team (the task), $parent (--orchestrator),
+# and hooks/team-report.sh via `claude --settings`, which saves a "FINAL:" report to
+#   ${XDG_STATE_HOME:-~/.local/state}/herdr-spawn/<task>/<name>.md
+# With --orchestrator, the caller's own pane is also renamed in Herdr to that name.
 #
 # Prints one JSON line describing the spawn.
 
@@ -108,12 +115,19 @@ wait_for_settle=no
 timeout_ms=300000
 dry_run=no
 close=no
+reap=no
+oneshot=no
 envs=()
 claude_args=()
 
-[ $# -gt 0 ] || die "usage: $SELF <name> --task <slug> [options] [-- <claude args...>]"
-name="$1"; shift
-case "$name" in -*) die "first argument must be the agent name, got '$name'" ;; esac
+[ $# -gt 0 ] || die "usage: $SELF <name> --task <slug> [options] [-- <claude args...>] | $SELF --reap <task>"
+if [ "$1" = --reap ]; then
+  reap=yes; task="${2-}"; shift 2 2>/dev/null || shift
+  [ -n "$task" ] || die "usage: $SELF --reap <task>"
+else
+  name="$1"; shift
+  case "$name" in -*) die "first argument must be the agent name, got '$name'" ;; esac
+fi
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -127,6 +141,7 @@ while [ $# -gt 0 ]; do
     --wait)         wait_for_settle=yes; shift ;;
     --dry-run)      dry_run=yes; shift ;;
     --close)        close=yes; shift ;;
+    --oneshot)      oneshot=yes; shift ;;
     --)             shift; claude_args=("$@"); break ;;
     *)              die "unknown option '$1'" ;;
   esac
@@ -144,35 +159,6 @@ run() {
   if [ "$dry_run" = yes ]; then printf '+ %s\n' "$*" >&2; return 0; fi
   "$@"
 }
-
-# Teardown. Herdr drops a tab with its last pane, and the sidebar row with the pane, so
-# closing the pane is the whole job. Herdr's `done` only means a turn ended, so this is the
-# orchestrator's call once it has the child's final report, never a status-triggered hook.
-if [ "$close" = yes ]; then
-  info=$(herdr agent get "$name" 2>/dev/null) || die "no live agent named '$name' (herdr agent list)"
-  close_pane=$(printf '%s' "$info" | json_string_field pane_id)
-  [ -n "$close_pane" ] || die "could not read the pane of '$name' from herdr agent get"
-  [ "$close_pane" != "${HERDR_PANE_ID:-}" ] || die "refusing to close '$name': that is this pane"
-  run herdr pane close "$close_pane" >/dev/null || die "herdr pane close $close_pane failed"
-  printf '{"agent":"%s","pane_id":"%s","closed":true}\n' "$name" "$close_pane"
-  exit 0
-fi
-
-[ -n "$task" ] || die "--task <slug> is required; it is the tab label that groups the team"
-
-# Herdr's own constraint, enforced here so a bad name fails naming the rule, not the symptom.
-case "$name" in
-  [a-z]*) ;;
-  *) die "agent name must start with a lowercase letter: '$name'" ;;
-esac
-case "$name" in
-  *[!a-z0-9_-]*) die "agent name may only contain [a-z0-9_-]: '$name'" ;;
-esac
-[ ${#name} -le 32 ] || die "agent name must be at most 32 characters: '$name'"
-
-if herdr agent get "$name" >/dev/null 2>&1; then
-  die "an agent named '$name' is already live; names must be unique (herdr agent list)"
-fi
 
 tab_id_for_label() {
   herdr tab list --workspace "$HERDR_WORKSPACE_ID" \
@@ -193,6 +179,86 @@ panes_in_tab() {
         printf '\n'
       done
 }
+
+# Where hooks/team-report.sh saves a child's FINAL report. The spawner hands the child the
+# full path (CC_TEAM_REPORT_FILE) and --reap recomputes it, so this is the one definition.
+report_file() { # <task> <name>
+  printf '%s/herdr-spawn/%s/%s.md\n' "${XDG_STATE_HOME:-$HOME/.local/state}" \
+    "$(printf '%s' "$1" | tr '/\\' '__')" "$2"
+}
+
+# Teardown. Herdr drops a tab with its last pane, and the sidebar row with the pane, so
+# closing the pane is the whole job. Herdr's `done` only means a turn ended, so this is the
+# orchestrator's call once it has the child's final report, never a status-triggered hook.
+close_pane() { # <pane> <label for messages>; 1 on refusal or failure, with the reason on stdout
+  if [ "$1" = "${HERDR_PANE_ID:-}" ]; then printf 'that is this pane'; return 1; fi
+  run herdr pane close "$1" >/dev/null || { printf 'herdr pane close %s failed' "$1"; return 1; }
+}
+
+if [ "$close" = yes ]; then
+  info=$(herdr agent get "$name" 2>/dev/null) || die "no live agent named '$name' (herdr agent list)"
+  pane=$(printf '%s' "$info" | json_string_field pane_id)
+  [ -n "$pane" ] || die "could not read the pane of '$name' from herdr agent get"
+  why=$(close_pane "$pane") || die "refusing to close '$name': $why"
+  printf '{"agent":"%s","pane_id":"%s","closed":true}\n' "$name" "$pane"
+  exit 0
+fi
+
+# Reap a task: close the panes whose work is provably over. The trigger is the report file,
+# not the status — `done` fires after every turn, including a child waiting for an answer —
+# and the status check only stops us closing a child mid-turn after it reported. A report
+# from another session (a stale file under a reused name) does not count.
+if [ "$reap" = yes ]; then
+  tab_id=$(tab_id_for_label "$task")
+  [ -n "$tab_id" ] || die "no tab labelled '$task' in workspace $HERDR_WORKSPACE_ID"
+  agents=$(herdr agent list 2>/dev/null | json_records)
+  n_closed=0; n_skipped=0
+  for pane in $(panes_in_tab "$tab_id"); do
+    rec=$(printf '%s\n' "$agents" | grep -F "\"pane_id\":\"$pane\"" | head -n 1)
+    name=$(printf '%s' "$rec" | json_string_field name)
+    status=$(printf '%s' "$rec" | json_string_field agent_status)
+    session=$(printf '%s' "$rec" | json_string_field value agent_session)
+    file=""; [ -z "$name" ] || file=$(report_file "$task" "$name")
+    why=""
+    if   [ "$pane" = "${HERDR_PANE_ID:-}" ]; then why="this pane"
+    elif [ -z "$rec" ];  then why="no agent in pane"
+    elif [ -z "$name" ]; then why="agent has no name, so no report file"
+    elif [ ! -r "$file" ]; then why="no report at $file"
+    elif [ -n "$session" ] && ! grep -qx "session_id: $session" "$file"; then
+      why="report in $file is from another session than $session"
+    else
+      case "$status" in idle|done) ;; *) why="agent is $status" ;; esac
+    fi
+    if [ -z "$why" ] && why=$(close_pane "$pane"); then
+      printf 'closed  %s %s (report: %s)\n' "$pane" "$name" "$file"; n_closed=$((n_closed + 1))
+    else
+      printf 'skipped %s %s (%s)\n' "$pane" "${name:--}" "$why"; n_skipped=$((n_skipped + 1))
+    fi
+  done
+  printf '{"task":"%s","tab_id":"%s","closed":%d,"skipped":%d}\n' "$task" "$tab_id" "$n_closed" "$n_skipped"
+  exit 0
+fi
+
+[ -n "$task" ] || die "--task <slug> is required; it is the tab label that groups the team"
+
+# Herdr's own constraint, enforced here so a bad name fails naming the rule, not the symptom.
+case "$name" in
+  [a-z]*) ;;
+  *) die "agent name must start with a lowercase letter: '$name'" ;;
+esac
+case "$name" in
+  *[!a-z0-9_-]*) die "agent name may only contain [a-z0-9_-]: '$name'" ;;
+esac
+[ ${#name} -le 32 ] || die "agent name must be at most 32 characters: '$name'"
+# Two sessions sharing a peer name make bare-name SendMessage ambiguous (seen 2026-10-24:
+# a child listed as a second "LaneB"), and the orchestrator's pane takes this name in Herdr.
+if [ -n "$orchestrator" ] && [ "$(printf '%s' "$orchestrator" | tr 'A-Z' 'a-z')" = "$name" ]; then
+  die "agent name '$name' is the orchestrator's own name; a child must have a name of its own"
+fi
+
+if herdr agent get "$name" >/dev/null 2>&1; then
+  die "an agent named '$name' is already live; names must be unique (herdr agent list)"
+fi
 
 # Which pane to split, and which way. Always the largest by area, halved along its longer
 # axis — that is what turns N agents into a grid instead of N stacked ribbons. Splitting the
@@ -253,12 +319,17 @@ split_direction() {
 # while the messaging identity had moved from rollout-collection-8c [bcfc95] to
 # rollout-collection-fc [64e7b6]. So the session uuid is kept for correlation but marked for
 # what it is — a startup-time value that a resume can strand — and nothing is built on it.
+#
+# CC_TEAM_REPORT_FILE is where hooks/team-report.sh saves this child's FINAL report.
+report=$(report_file "$task" "$name")
+team_env=("CC_TEAM_REPORT_FILE=$report")
+[ "$oneshot" = no ] || team_env+=("CC_TEAM_ONESHOT=1")
 env_args=()
 for kv in "CC_TEAM_TASK=$task" "CC_TEAM_AGENT=$name" \
           "CC_TEAM_ORCHESTRATOR=$orchestrator" \
           "CC_TEAM_ORCHESTRATOR_PANE=${HERDR_PANE_ID:-}" \
           "CC_TEAM_ORCHESTRATOR_SESSION_AT_START=${CLAUDE_CODE_SESSION_ID:-}" \
-          ${envs[@]+"${envs[@]}"}; do
+          "${team_env[@]}" ${envs[@]+"${envs[@]}"}; do
   env_args+=(--env "$kv")
 done
 
@@ -492,10 +563,25 @@ agent_file() { # <name>: the .md whose frontmatter `name:` matches, project dirs
 # Prints {"<name>":{...}} with <tool> appended to `tools:`, or nothing when no rewrite is
 # needed (no whitelist, or the tool is already on it). Exits 2 on a form it does not parse.
 agent_json_with_tool() { # <file> <name> <tool>
-  awk -v name="$2" -v tool="$3" '
-    function esc(s,   o,i,c) { o=""; for (i=1;i<=length(s);i++) { c=substr(s,i,1)
+  # ASCII out, always: non-ASCII becomes \uXXXX (surrogate pairs above U+FFFF). Herdr types
+  # this argv into the pane's shell, and a long argument mixing em-dashes with \" escapes
+  # never arrived intact — the shell sat on an open quote and the spawn timed out (observed
+  # 2026-10-24 with bulk-reader, herdr 0.9.5 + fish; the same text with "-" spawned fine).
+  # LC_ALL=C makes awk see bytes, which the decoder below reassembles into code points.
+  LC_ALL=C awk -v name="$2" -v tool="$3" '
+    BEGIN { for (b=0; b<256; b++) ORD[sprintf("%c", b)] = b }
+    function u4(cp) { return sprintf("\\u%04x", cp) }
+    function esc(s,   o,i,c,b,n,cp,k) { o=""; for (i=1;i<=length(s);i++) { c=substr(s,i,1); b=ORD[c]
         if (c=="\\") o=o "\\\\"; else if (c=="\"") o=o "\\\""; else if (c=="\t") o=o "\\t"
-        else if (c=="\n") o=o "\\n"; else if (c!="\r") o=o c }; return o }
+        else if (c=="\n") o=o "\\n"; else if (c=="\r") continue
+        else if (b < 128) o=o c
+        else {
+          if (b >= 240) { n=3; cp=b-240 } else if (b >= 224) { n=2; cp=b-224 } else if (b >= 192) { n=1; cp=b-192 } else { o=o u4(65533); continue }
+          for (k=1; k<=n; k++) cp = cp*64 + (ORD[substr(s,i+k,1)] % 64)
+          i += n
+          if (cp >= 65536) { cp -= 65536; o = o u4(55296 + int(cp/1024)) u4(56320 + cp%1024) }
+          else o = o u4(cp)
+        } }; return o }
     function bad() { broken=1; exit }
     function unq(s) { sub(/^[ \t]+/,"",s); sub(/[ \t]+$/,"",s)
       if (s ~ /^".*"$/ || s ~ /^'\''.*'\''$/) s=substr(s,2,length(s)-2); return s }
@@ -522,7 +608,7 @@ agent_json_with_tool() { # <file> <name> <tool>
     END {
       if (broken) exit 2
       if (fm || !body) exit 2
-      for (k in val) if (k !~ /^(name|description|model|color|permissionMode|effort|maxTurns)$/) exit 2
+      for (k in val) if (k !~ /^(name|description|model|color|permissionMode|effort|maxTurns|tools|disallowedTools)$/) exit 2
       for (k in islist) if (k !~ /^(tools|disallowedTools|skills)$/) exit 2
       if (!islist["tools"] && val["tools"]=="") exit 0          # no whitelist: inherits all
       t = islist["tools"] ? lst["tools"] : val["tools"]
@@ -563,12 +649,58 @@ if [ -n "$orchestrator" ]; then
   fi
 fi
 
+# The durable report. hooks/team-report.sh goes in through --settings rather than the plugin's
+# hooks.json so it travels with whichever spawner started the child (a session on an older
+# installed plugin still gets it) and never runs in sessions this script did not start. Hooks
+# from --settings merge with the user's own (verified 2026-10-24, claude 2.1.310). claude takes
+# one --settings value, and a caller's may be a file path we cannot merge into, so a caller's
+# own --settings wins and the child gets no report hook, with a warning.
+REPORT_HOOK="$(cd -- "$(dirname -- "$LIB")" && pwd)/team-report.sh"
+has_settings=no
+for a in ${claude_args[@]+"${claude_args[@]}"}; do
+  case "$a" in --settings|--settings=*) has_settings=yes ;; esac
+done
+if [ "$has_settings" = yes ]; then
+  printf '%s: warning: --settings was passed, so no FINAL report hook; --reap will skip %s\n' "$SELF" "$name" >&2
+else
+  hook_cmd=$(printf 'bash "%s"' "$REPORT_HOOK" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  hook="{\"type\":\"command\",\"command\":\"$hook_cmd\",\"timeout\":15}"
+  # A file, not inline JSON: everything after `--` is typed into the pane's shell, and the
+  # shorter that line the less there is to lose (see the retry below).
+  settings_file="${report%.md}.settings.json"
+  if [ "$dry_run" = no ]; then
+    mkdir -p -- "$(dirname -- "$settings_file")" \
+      && printf '{"hooks":{"PostToolUse":[{"matcher":"SendMessage","hooks":[%s]}],"Stop":[{"hooks":[%s]}]}}\n' \
+           "$hook" "$hook" > "$settings_file" \
+      || die "could not write $settings_file"
+  fi
+  if command -v cygpath >/dev/null 2>&1; then settings_file=$(cygpath -w "$settings_file"); fi
+  claude_args+=(--settings "$settings_file")
+fi
+# A report left by an earlier agent of the same name would let --reap close this one unread.
+[ "$dry_run" = yes ] || rm -f -- "$report"
+
 # --name sets the Claude Code peer name that SendMessage addresses; --session-id pins the
 # uuid that `herdr agent list` reports back as agent_session.value. Native claude flags only
 # after `--`, per the herdr skill.
-run herdr agent start "$name" --kind claude --pane "$pane_id" -- \
-    --name "$name" --session-id "$session_id" ${claude_args[@]+"${claude_args[@]}"} \
-  || die "herdr agent start failed for '$name' in pane $pane_id (see: herdr pane read $pane_id)"
+#
+# One retry. Herdr types this command into the pane's interactive shell, and with a long
+# argv (a re-emitted --agents definition runs to ~2.6 KB) that intermittently never ran:
+# the shell sat on a half-typed line with stray `}}'` at the end until the startup timeout.
+# Observed 2026-10-24 with herdr 0.9.5 + fish 4.9.3: the same argv failed 1 run in 6 and
+# passed the rest, and the bytes Herdr types (captured into `cat`) were intact, so it is a
+# race in the line editor, not quoting. Ctrl-C clears the line and the second try usually lands.
+start_agent() {
+  run herdr agent start "$name" --kind claude --pane "$pane_id" -- \
+    --name "$name" --session-id "$session_id" ${claude_args[@]+"${claude_args[@]}"}
+}
+if ! start_agent; then
+  printf '%s: warning: herdr agent start failed in %s; clearing the line and retrying once\n' "$SELF" "$pane_id" >&2
+  run herdr pane send-keys "$pane_id" C-c >/dev/null 2>&1
+  sleep 1
+  start_agent \
+    || die "herdr agent start failed twice for '$name' in pane $pane_id (see: herdr pane read $pane_id)"
+fi
 
 # Sidebar hierarchy, display only, lasting until the pane closes. Herdr's `agent` token
 # reads "claude" for every Claude pane, so both ends get their peer name as display name;
@@ -582,12 +714,37 @@ tag_pane() { # <pane> <report-metadata args...>
   run herdr pane report-metadata "$pane" --source herdr-spawn "$@" >/dev/null \
     || printf '%s: warning: could not tag pane %s for the sidebar\n' "$SELF" "$pane" >&2
 }
+
+# The orchestrator's own Herdr name. A session Herdr detected on its own (not started with
+# `herdr agent start`) has `name: null` in `herdr agent list`, so `herdr agent get <name>`
+# cannot find it; display_agent above is only the sidebar label. `herdr agent rename <pane>
+# <name>` names a running pane in place (verified 2026-10-24, herdr 0.9.5, including on a
+# pane whose name was cleared). Herdr names are [a-z][a-z0-9_-]{0,31} \u2014 "LaneB" is refused
+# with invalid_agent_name \u2014 so the peer name is lowercased and anything else becomes "-".
+# Every spawn re-applies it, which is how a renamed orchestrator (resume or compaction:
+# 5d\u21925e) catches up: the next spawn passes the new --orchestrator and the pane follows.
+herdr_name() {
+  local n
+  n=$(printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g')
+  case "$n" in [a-z]*) ;; *) n="o-$n" ;; esac
+  printf '%s' "${n:0:32}"
+}
+name_orchestrator_pane() { # <pane> <peer name>
+  local want have
+  want=$(herdr_name "$2")
+  have=$(herdr agent get "$1" 2>/dev/null | json_string_field name)
+  [ "$have" != "$want" ] || return 0
+  run herdr agent rename "$1" "$want" >/dev/null 2>&1 \
+    || printf '%s: warning: could not name pane %s "%s" in Herdr (taken, or no agent there)\n' "$SELF" "$1" "$want" >&2
+}
+
 indent=$'\u2800\u2800\u2800\u2800'
 meta=(--display-agent "$name" --token "team=$task" --token "nested=$indent$name")
 [ -z "$orchestrator" ] || meta+=(--token "parent=$orchestrator" --token "under=↳ $orchestrator")
 tag_pane "$pane_id" "${meta[@]}"
 if [ -n "$orchestrator" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
   tag_pane "$HERDR_PANE_ID" --display-agent "$orchestrator"
+  name_orchestrator_pane "$HERDR_PANE_ID" "$orchestrator"
 fi
 
 if [ -n "$prompt" ]; then
