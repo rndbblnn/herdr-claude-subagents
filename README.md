@@ -164,6 +164,22 @@ claude = [
 
 `$nested` is the child's name, indented with blank U+2800 characters because Herdr trims leading spaces from token values. Only spawned children have it, so other sessions stay on one line. `$under` (`↳ <parent>`) is also available. Keep `ui.agent_panel_sort` on its default `"spaces"` so each team stays under its parent. `$team` and `$parent` are there too, for your own layouts and rules.
 
+### 🏷️ One name per session
+
+Without help, a session you start yourself has three names: Claude's AI title in the app's session list, a folder-based peer name for `SendMessage`, and nothing in Herdr. The plugin's `session-name.sh` hook gives it one name, used in all three places plus the sidebar label:
+
+```text
+<repo abbr>[-<lane>]-<slug>     bo-b-weekly-grocery-shopping
+```
+
+- **repo abbr**: initials of a multi-word repo (`basildragon-orchestrator` → `bo`), a one-word repo as is. Linked worktrees use the main checkout's name.
+- **lane**: the slot, when the folder is a bound [`lane`](https://github.com/rndbblnn/lanes) worktree (`lane status`). Left out otherwise.
+- **slug**: the first three meaningful words of Claude's own AI title.
+
+Claude writes its AI title during the first turn, so the name lands at your **second** prompt, and from then on it's fixed: setting it stops Claude's AI retitling. Herdr caps names at 32 characters (cut at a word), and a taken name gets `-2`.
+
+Left alone: sessions that already have a name (`claude --name`, `/rename`, spawned children), whose Herdr name just follows Claude's; and a session that has spawned children, since they address it by its current name. Inside Herdr only.
+
 <a id="requirements"></a>
 
 ## 📦 Requirements
