@@ -353,7 +353,48 @@ expect "outside Herdr: silent, exit 0" bash -c '[ -z "$1" ] && [ "$2" = 0 ] && !
 out=$(name_run "$T/n14" UserPromptSubmit "$T/t1.jsonl" "$T/repos/my-cool-repo" FAKE_RENAME_FAIL=1); rc=$?
 expect "Herdr refusing every name: no title, exit 0" bash -c '[ -z "$1" ] && [ "$2" = 0 ]' _ "$out" "$rc"
 
-for f in "$ROOT"/hooks/*.sh "$ROOT"/scripts/*.sh; do
+# .githooks/post-commit: starts the readme-writer on <last reviewed>..HEAD, on main only, never
+# for its own docs(readme) commits or mid-rebase. Fakes record argv; the hook backgrounds them.
+RG="$T/rg"; mkdir -p "$RG/bin"
+git init -q -b main "$RG/repo"; git -C "$RG/repo" config user.email t@t; git -C "$RG/repo" config user.name t
+git -C "$RG/repo" config core.hooksPath "$ROOT/.githooks"
+printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "$FAKE_RUN"\n' > "$RG/bin/fake-run"; chmod +x "$RG/bin/fake-run"
+cp "$RG/bin/fake-run" "$RG/bin/claude"; printf '#!/bin/sh\nexit 0\n' > "$RG/bin/herdr"; chmod +x "$RG/bin/herdr"
+rc() { # <run log> <subject> [env...]  commit in the scratch repo, wait for the backgrounded fake
+  local run="$1" msg="$2"; shift 2; rm -f "$run"
+  env PATH="$RG/bin:$PATH" FAKE_RUN="$run" README_AGENT_SPAWNER="$RG/bin/fake-run" "$@" \
+    git -C "$RG/repo" commit -q --allow-empty -m "$msg" 2>/dev/null
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e "$run" ] && break; sleep 0.1; done
+}
+git -C "$RG/repo" commit -q --allow-empty -m "feat: root" 2>/dev/null; rm -f "$RG/repo/.git/readme-agent/pid"
+c1=$(git -C "$RG/repo" rev-parse HEAD)
+rc "$RG/r1" "feat: one" HERDR_ENV=1 HERDR_WORKSPACE_ID=w0
+c2=$(git -C "$RG/repo" rev-parse HEAD)
+expect "post-commit in Herdr spawns readme-writer on HEAD~1..HEAD, oneshot" bash -c '
+  head -1 "$1" | grep -q "herdr-spawn.sh\|fake-run" ; grep -qx readme-writer "$1" && grep -qx -- --oneshot "$1" &&
+  grep -q "range $2..$3 on main" "$1" && grep -qx -- --agent "$1"' _ "$RG/r1" "$c1" "$c2"
+git rev-parse "$c2" > "$RG/repo/.git/readme-agent/last-reviewed"
+git -C "$RG/repo" commit -q --allow-empty -m "fix: a" --no-verify 2>/dev/null
+rm -f "$RG/repo/.git/readme-agent/pid"; rc "$RG/r2" "fix: b" HERDR_ENV=
+c4=$(git -C "$RG/repo" rev-parse HEAD)
+expect "outside Herdr: claude -p from the last reviewed SHA, so no commit is skipped" \
+  bash -c 'grep -qx -- -p "$1" && grep -q "range $2..$3 on main" "$1"' _ "$RG/r2" "$c2" "$c4"
+rm -f "$RG/repo/.git/readme-agent/pid"; rc "$RG/r3" "docs(readme): mention x" HERDR_ENV=
+expect "its own docs(readme) commit never starts it again" test ! -e "$RG/r3"
+git -C "$RG/repo" checkout -q -b side; rc "$RG/r4" "feat: on a branch" HERDR_ENV=; git -C "$RG/repo" checkout -q main
+expect "only main" test ! -e "$RG/r4"
+mkdir "$RG/repo/.git/rebase-merge"; rc "$RG/r5" "feat: mid-rebase" HERDR_ENV=; rmdir "$RG/repo/.git/rebase-merge"
+expect "nothing during a rebase" test ! -e "$RG/r5"
+rm -f "$RG/repo/.git/readme-agent/pid"; rc "$RG/r6" "feat: skipped" HERDR_ENV= README_AGENT_OFF=1
+expect "README_AGENT_OFF=1 skips one commit" test ! -e "$RG/r6"
+sleep 30 & echo $! > "$RG/repo/.git/readme-agent/pid"; rc "$RG/r7" "feat: while busy" HERDR_ENV=
+expect "a busy headless run is not doubled" test ! -e "$RG/r7"; kill %+ 2>/dev/null
+printf 'sleep 5\n' > "$RG/bin/slow"
+start=$(date +%s%N); env PATH="$RG/bin:$PATH" FAKE_RUN=/dev/null README_AGENT_SPAWNER="$RG/bin/slow" HERDR_ENV=1 HERDR_WORKSPACE_ID=w0 \
+  bash -c 'git -C "$1" commit -q --allow-empty -m "feat: slow agent" | cat' _ "$RG/repo" 2>/dev/null
+expect "the commit returns at once even when piped (no held stdio)" bash -c '[ $(( ($(date +%s%N) - $1) / 1000000 )) -lt 3000 ]' _ "$start"
+
+for f in "$ROOT"/hooks/*.sh "$ROOT"/scripts/*.sh "$ROOT"/.githooks/*; do
   bash -n "$f" && echo "ok   syntax $(basename "$f")" || { echo "FAIL syntax $f"; fail=1; }
 done
 

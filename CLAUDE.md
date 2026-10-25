@@ -94,3 +94,13 @@
   Enter up to 3 times, only while the agent is `idle` (blocked = a dialog, never press Enter
   there), and says `"prompted":true` only once the turn started. The live run needed one extra
   Enter, and the transcript had exactly one user message (no double submit).
+- **README agent (2026-10-25).** `.githooks/post-commit` starts `.claude/agents/readme-writer.md`
+  after every commit on `main` (enable per clone: `git config core.hooksPath .githooks`; skip
+  one: `README_AGENT_OFF=1`). The agent decides if the range is README-worthy, edits README.md
+  only, commits `docs(readme): …` and **pushes** (operator's choice). Loop guard: the hook
+  ignores `docs(readme)` subjects. Range = `.git/readme-agent/last-reviewed`..HEAD, so a commit
+  made while a run is busy is caught by the next one. In Herdr it uses this repo's own
+  spawner (`--oneshot`, tab "readme"; the spawner's unique-name check is the lock), else
+  headless `claude -p` with a pid file. The hook backgrounds the agent with all stdio on a
+  log file: a child holding git's stdout made a piped `git commit` wait for the whole run.
+  Logs: `.git/readme-agent/run-*.log`; FINAL report: `~/.local/state/herdr-spawn/readme/`.

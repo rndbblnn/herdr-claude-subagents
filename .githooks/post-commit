@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# After a commit on main, start the readme-writer agent (.claude/agents/readme-writer.md) on
+# every commit since the README was last reviewed. The agent decides whether the README needs
+# a change, and if so commits `docs(readme): …` and pushes.
+#
+# Enable once per clone:   git config core.hooksPath .githooks
+# Skip one commit:         README_AGENT_OFF=1 git commit …
+#
+# Inside Herdr the agent gets its own pane (tab "readme") through this repo's spawner, so you
+# can watch it; `--oneshot` closes the pane once its FINAL report is saved. Outside Herdr it
+# runs headless with `claude -p`, logging to .git/readme-agent/.
+#
+# Guards: the agent's own docs(readme) commits never trigger it (no loop); only main; nothing
+# during a rebase, merge, cherry-pick or revert; one run at a time (in Herdr the spawner
+# refuses a second live "readme-writer", outside a pid file). A commit made while a run is
+# busy is not lost: the next run starts from the last reviewed SHA.
+#
+# Must return at once and hold none of git's file descriptors: a `git commit` run by Claude's
+# Bash tool would otherwise wait for the whole agent run.
+
+main() {
+  [ -z "${README_AGENT_OFF:-}" ] || return 0
+
+  local top gd subject state from to prompt log
+  top=$(git rev-parse --show-toplevel) || return 0
+  gd=$(git rev-parse --absolute-git-dir) || return 0
+
+  subject=$(git log -1 --format=%s)
+  case "$subject" in "docs(readme)"*) return 0 ;; esac
+  [ "$(git symbolic-ref --short -q HEAD)" = main ] || return 0
+  [ -d "$gd/rebase-merge" ] || [ -d "$gd/rebase-apply" ] && return 0
+  for f in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD; do [ -e "$gd/$f" ] && return 0; done
+
+  state="$gd/readme-agent"
+  mkdir -p "$state" || return 0
+  to=$(git rev-parse HEAD)
+  from=$(cat "$state/last-reviewed" 2>/dev/null)
+  if [ -z "$from" ] || ! git merge-base --is-ancestor "$from" "$to" 2>/dev/null; then
+    from=$(git rev-parse -q --verify HEAD~1) || return 0
+  fi
+  [ "$from" != "$to" ] || return 0
+
+  prompt="Review the commit range $from..$to on main and update README.md if it needs it, following your instructions."
+  log="$state/run-$(date +%Y%m%d-%H%M%S).log"
+
+  if [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_WORKSPACE_ID:-}" ] && command -v herdr >/dev/null 2>&1; then
+    detach bash "${README_AGENT_SPAWNER:-$top/scripts/herdr-spawn.sh}" readme-writer \
+      --task readme --oneshot --cwd "$top" --prompt "$prompt" -- --agent readme-writer
+    echo "readme-agent: reviewing ${from:0:7}..${to:0:7} in a Herdr pane (tab \"readme\"); log: $log" >&2
+  else
+    if kill -0 "$(cat "$state/pid" 2>/dev/null)" 2>/dev/null; then
+      echo "readme-agent: a run is busy; the next commit picks up ${from:0:7}..${to:0:7}" >&2
+      return 0
+    fi
+    command -v claude >/dev/null 2>&1 || return 0
+    detach claude -p "$prompt" --agent readme-writer \
+      --allowedTools "Read Edit Write Grep Glob Bash(git:*) Bash(rg:*) Bash(mkdir:*) Bash(ls:*)"
+    echo $! > "$state/pid"
+    echo "readme-agent: reviewing ${from:0:7}..${to:0:7} headless; log: $log" >&2
+  fi
+}
+
+detach() { # run "$@" in the background, from the repo root, with no tie to git's stdio
+  ( cd "$top" && exec nohup "$@" </dev/null >"$log" 2>&1 ) &
+}
+
+main "$@"
+exit 0
