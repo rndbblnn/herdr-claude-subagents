@@ -86,6 +86,11 @@
   claimed first (unique, max 32) so the title uses exactly what Herdr accepted.
   Sidebar label: the hook reports `--display-agent` under source `herdr-spawn` only for
   unspawned panes, because a report replaces a child's `$nested`/`$under` tokens.
-- **`herdr agent prompt` into a lane-b session typed without submitting** (2026-10-25, twice in
-  a row; the next Enter sent both lines as one prompt). Not seen elsewhere; if a live test
-  stalls, `herdr pane read` before assuming the hook failed.
+- **A long brief can lose its Enter (2026-10-25).** Herdr pastes, then presses Enter; while
+  Claude Code is still taking in a big paste the Enter is dropped, the text sits in the input
+  box, and a plain `herdr agent prompt` still exits 0. Reproduced live with a 74 KB brief (an
+  81-line one went through). The spawner now prompts with `--wait --until working --until
+  blocked --until done`, so Herdr reports `agent_prompt_stalled` after 5 s; it then presses
+  Enter up to 3 times, only while the agent is `idle` (blocked = a dialog, never press Enter
+  there), and says `"prompted":true` only once the turn started. The live run needed one extra
+  Enter, and the transcript had exactly one user message (no double submit).

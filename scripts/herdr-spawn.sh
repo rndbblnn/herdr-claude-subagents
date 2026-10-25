@@ -754,13 +754,38 @@ if [ -n "$orchestrator" ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && [ "$dry_run
     || printf '%s: warning: could not write %s; the session-name hook may rename you\n' "$SELF" "$marker" >&2
 fi
 
+# Herdr pastes the prompt, then presses Enter. With a long multi-line brief, Claude Code can
+# still be taking in the paste when the Enter arrives, and the Enter is lost: the text sits in
+# the input box, the agent stays idle, and a plain `agent prompt` still exits 0 (observed
+# 2026-10-25). With --wait, Herdr reports agent_prompt_stalled when no working/blocked state
+# follows within 5 s. On a stall, press Enter again, but only while the agent is idle: blocked
+# means a dialog, and an Enter there would answer it. An Enter on an empty box does nothing.
+deliver_prompt() {
+  local out status i
+  out=$(run herdr agent prompt "$name" "$prompt" --wait --until working --until blocked \
+          --until done --timeout 20000 2>&1) && return 0
+  case "$out" in *agent_blocked*) return 1 ;; esac
+  for i in 1 2 3; do
+    status=$(herdr agent get "$name" 2>/dev/null | json_string_field agent_status)
+    case "$status" in
+      working|blocked|done) return 0 ;;
+      idle) ;;
+      *) return 1 ;;
+    esac
+    printf '%s: prompt to %s not submitted yet; pressing Enter (%d/3)\n' "$SELF" "$name" "$i" >&2
+    run herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1 || return 1
+    run herdr agent wait "$name" --until working --until blocked --until done --timeout 5000 \
+      >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
 if [ -n "$prompt" ]; then
+  deliver_prompt \
+    || die "prompt to '$name' was not submitted; see its input box with: herdr pane read $pane_id"
   if [ "$wait_for_settle" = yes ]; then
-    run herdr agent prompt "$name" "$prompt" --wait --timeout "$timeout_ms" \
+    run herdr agent wait "$name" --timeout "$timeout_ms" >/dev/null \
       || die "prompt to '$name' did not settle; inspect with: herdr agent get $name"
-  else
-    run herdr agent prompt "$name" "$prompt" \
-      || die "prompt to '$name' was not submitted; inspect with: herdr agent get $name"
   fi
 fi
 

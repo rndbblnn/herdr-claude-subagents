@@ -39,10 +39,16 @@ case "$1 $2" in
   "pane list")  echo "${FAKE_PANES:-{\"result\":{\"panes\":[]}\}}" ;;
   "agent list") echo "${FAKE_AGENTS:-{\"result\":{\"agents\":[]}\}}" ;;
   "agent rename") [ -z "${FAKE_RENAME_FAIL:-}" ] && [ "$4" != "${FAKE_RENAME_TAKEN:-}" ] || exit 1 ;;
-  "agent start") [ -z "${FAKE_START_FAIL:-}" ] || { [ -e "$FAKE_LOG.started" ] || { touch "$FAKE_LOG.started"; exit 1; }; } ;;
+  "agent start") touch "$FAKE_LOG.live"; [ -z "${FAKE_START_FAIL:-}" ] || { [ -e "$FAKE_LOG.started" ] || { touch "$FAKE_LOG.started"; exit 1; }; } ;;
   "tab create") echo '{"result":{"tab":{"tab_id":"w0:t9"},"root_pane":{"pane_id":"w0:p9"}}}' ;;
+  "agent prompt") case "${FAKE_PROMPT:-}" in
+      stalled) echo '{"error":{"code":"agent_prompt_stalled"}}'; exit 1 ;;
+      blocked) echo '{"error":{"code":"agent_blocked"}}'; exit 1 ;;
+    esac ;;
+  "agent wait") [ -z "${FAKE_WAIT_FAIL:-}" ] || exit 1 ;;
   "agent get")
     case "$3" in
+      "${FAKE_STATUS_FOR:-\0}") [ -e "$FAKE_LOG.live" ] || exit 1; echo "{\"result\":{\"agent\":{\"agent_status\":\"${FAKE_STATUS:-idle}\"}}}" ;;
       done1) echo '{"result":{"agent":{"name":"done1","pane_id":"w0:p7","tab_id":"w0:t9"}}}' ;;
       me)    echo '{"result":{"agent":{"name":"me","pane_id":"w0:p1","tab_id":"w0:t1"}}}' ;;
       *)     exit 1 ;;   # no agent by that name is live
@@ -53,11 +59,11 @@ chmod +x "$T/bin/herdr"
 # Pretty-printed like Claude Code writes it; the spawner's trust reader depends on that indent.
 printf '{\n  "projects": {\n    "%s": {\n      "hasTrustDialogAccepted": true\n    }\n  }\n}\n' "$ROOT" > "$T/cfg/.claude.json"
 spawn() { # <log> <spawner args...>
-  local log="$1"; shift; : > "$log"
+  local log="$1"; shift; : > "$log"; rm -f "$log.live"
   env PATH="$T/bin:$PATH" FAKE_LOG="$log" CLAUDE_CONFIG_DIR="$T/cfg" HERDR_ENV=1 \
     XDG_STATE_HOME="$T/state" \
     HERDR_WORKSPACE_ID=w0 HERDR_PANE_ID=w0:p1 \
-    bash "$ROOT/scripts/herdr-spawn.sh" "$@" --cwd "$ROOT" >/dev/null 2>"$log.err"
+    bash "$ROOT/scripts/herdr-spawn.sh" "$@" --cwd "$ROOT" >"$log.out" 2>"$log.err"
 }
 expect() { # <label> <command...>
   local label="$1"; shift
@@ -269,6 +275,30 @@ expect "--reap explains every skip" bash -c '
 env PATH="$T/bin:$PATH" FAKE_LOG="$T/u" HERDR_ENV=1 HERDR_WORKSPACE_ID=w0 HERDR_PANE_ID=w0:p1 \
   bash "$ROOT/scripts/herdr-spawn.sh" --reap nosuch >/dev/null 2>"$T/u.err"
 expect "--reap on an unknown task fails" bash -c 'grep -q "no tab labelled" "$1.err" && ! grep -qx close "$1"' _ "$T/u"
+
+# Prompt delivery: a lost Enter leaves a long brief in the input box while `agent prompt`
+# exits 0 (observed 2026-10-25). The spawner asks Herdr to confirm the agent started, presses
+# Enter again on a stall while the agent is idle, and only then says "prompted":true.
+spawn "$T/p1" pk1 --task tp --prompt "brief"
+expect "prompt asks Herdr to confirm the turn started" \
+  bash -c 'call "$1" agent prompt | grep -qx working && ! grep -qx send-keys "$1" && grep -q "\"prompted\":true" "$1.out"' _ "$T/p1"
+FAKE_PROMPT=stalled FAKE_STATUS_FOR=pk2 spawn "$T/p2" pk2 --task tp --prompt "brief"
+expect "a stalled prompt gets one more Enter, then counts as delivered" \
+  bash -c '[ "$(grep -c -x send-keys "$1")" = 1 ] && grep -A2 -x send-keys "$1" | grep -qx Enter &&
+    grep -q "\"prompted\":true" "$1.out" && grep -q "pressing Enter (1/3)" "$1.err"' _ "$T/p2"
+FAKE_PROMPT=stalled FAKE_STATUS_FOR=pk3 FAKE_WAIT_FAIL=1 spawn "$T/p3" pk3 --task tp --prompt "brief"
+expect "an Enter that never takes: 3 tries, then fail, never \"prompted\":true" \
+  bash -c '[ "$(grep -c -x send-keys "$1")" = 3 ] && ! grep -q prompted "$1.out" &&
+    grep -q "was not submitted; see its input box" "$1.err"' _ "$T/p3"
+FAKE_PROMPT=blocked FAKE_STATUS_FOR=pk4 spawn "$T/p4" pk4 --task tp --prompt "brief"
+expect "an agent at a dialog never gets an Enter" \
+  bash -c '! grep -qx send-keys "$1" && grep -q "was not submitted" "$1.err"' _ "$T/p4"
+FAKE_PROMPT=stalled FAKE_STATUS_FOR=pk5 FAKE_STATUS=blocked spawn "$T/p5" pk5 --task tp --prompt "brief"
+expect "a stall that turns out blocked: no Enter, delivered" \
+  bash -c '! grep -qx send-keys "$1" && grep -q "\"prompted\":true" "$1.out"' _ "$T/p5"
+spawn "$T/p6" pk6 --task tp --prompt "brief" --wait --timeout 1234
+expect "--wait settles with agent wait after delivery" \
+  bash -c '[ "$(call "$1" agent wait | tr "\n" " ")" = "pk6 --timeout 1234 " ]' _ "$T/p6"
 
 # Session naming: <repo abbr>[-<lane>]-<slug of the AI title>, set once at UserPromptSubmit,
 # claimed in Herdr first so the Claude title and the Herdr name are the same string.

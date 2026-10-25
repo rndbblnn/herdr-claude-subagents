@@ -64,6 +64,12 @@ Useful options:
 | `--dry-run` | print the herdr commands without running them |
 | `-- <claude args...>` | passed to `claude` verbatim — see permission mode below |
 
+`"prompted":true` in the spawn's output means the child actually started its turn. A long
+brief can lose its Enter while Claude Code takes in the paste; the spawner notices (Herdr
+reports the prompt as stalled), presses Enter again while the child is idle, and fails with
+`was not submitted` if three tries don't start it. Then `herdr pane read <pane>` shows the
+brief still sitting in the input box.
+
 The spawner also labels the panes for Herdr's agent panel: each child shows its own name with
 `$under` = "↳ <orchestrator>", and your pane shows your name. It also renames your pane in
 Herdr (`herdr agent rename`), so `herdr agent list` shows your name instead of `null`.
