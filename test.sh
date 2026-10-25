@@ -38,7 +38,7 @@ case "$1 $2" in
   "tab list")   echo "${FAKE_TABS:-{\"result\":{\"tabs\":[]}\}}" ;;
   "pane list")  echo "${FAKE_PANES:-{\"result\":{\"panes\":[]}\}}" ;;
   "agent list") echo "${FAKE_AGENTS:-{\"result\":{\"agents\":[]}\}}" ;;
-  "agent rename") [ -z "${FAKE_RENAME_FAIL:-}" ] || exit 1 ;;
+  "agent rename") [ -z "${FAKE_RENAME_FAIL:-}" ] && [ "$4" != "${FAKE_RENAME_TAKEN:-}" ] || exit 1 ;;
   "agent start") [ -z "${FAKE_START_FAIL:-}" ] || { [ -e "$FAKE_LOG.started" ] || { touch "$FAKE_LOG.started"; exit 1; }; } ;;
   "tab create") echo '{"result":{"tab":{"tab_id":"w0:t9"},"root_pane":{"pane_id":"w0:p9"}}}' ;;
   "agent get")
@@ -167,6 +167,9 @@ expect "a child named like its orchestrator is refused" \
   HERDR_ENV=1 HERDR_WORKSPACE_ID=w0 HERDR_PANE_ID=w0:p1 XDG_STATE_HOME="$T/state" \
   bash "$ROOT/scripts/herdr-spawn.sh" kid --task t1 --orchestrator boss --cwd "$ROOT" >/dev/null 2>"$T/n.err"
 expect "a refused rename only warns" bash -c 'grep -q "could not name pane" "$1.err" && grep -qx start "$1"' _ "$T/n"
+CLAUDE_CODE_SESSION_ID=sid-orch spawn "$T/m3" kid3 --task t1 --orchestrator boss
+expect "--orchestrator leaves the no-rename marker for session-name.sh" \
+  test -e "$T/state/herdr-spawn/orchestrators/sid-orch"
 
 # A first `agent start` that fails (the shell-typing race) is retried once after Ctrl-C.
 : > "$T/v"; env PATH="$T/bin:$PATH" FAKE_LOG="$T/v" FAKE_START_FAIL=1 CLAUDE_CONFIG_DIR="$T/cfg" \
@@ -266,6 +269,59 @@ expect "--reap explains every skip" bash -c '
 env PATH="$T/bin:$PATH" FAKE_LOG="$T/u" HERDR_ENV=1 HERDR_WORKSPACE_ID=w0 HERDR_PANE_ID=w0:p1 \
   bash "$ROOT/scripts/herdr-spawn.sh" --reap nosuch >/dev/null 2>"$T/u.err"
 expect "--reap on an unknown task fails" bash -c 'grep -q "no tab labelled" "$1.err" && ! grep -qx close "$1"' _ "$T/u"
+
+# Session naming: <repo abbr>[-<lane>]-<slug of the AI title>, set once at UserPromptSubmit,
+# claimed in Herdr first so the Claude title and the Herdr name are the same string.
+NHOOK="$ROOT/hooks/session-name.sh"
+mkdir -p "$T/repos/my-cool-repo" "$T/repos/homedevices" "$T/lanebin"
+git -C "$T/repos/my-cool-repo" init -q; git -C "$T/repos/homedevices" init -q
+printf '#!/bin/sh\n[ "$1" = status ] && echo "Lane B  (/x)"\n' > "$T/lanebin/lane"; chmod +x "$T/lanebin/lane"
+tr_ai()     { printf '{"type":"ai-title","aiTitle":"%s","sessionId":"s"}\n' "$2" > "$1"; }
+tr_custom() { printf '{"type":"ai-title","aiTitle":"x y","sessionId":"s"}\n{"type":"custom-title","customTitle":"%s","sessionId":"s"}\n' "$2" > "$1"; }
+name_run() { # <log> <event> <transcript> <cwd> [env...]  → stdout of the hook
+  local log="$1" ev="$2" tr="$3" cwd="$4"; shift 4; : > "$log"
+  printf '{"session_id":"sid-n","hook_event_name":"%s","transcript_path":"%s","cwd":"%s"}' "$ev" "$tr" "$cwd" \
+    | env -u CC_TEAM_AGENT PATH="$T/bin:$PATH" FAKE_LOG="$log" HERDR_ENV=1 HERDR_PANE_ID=w0:p1 \
+      XDG_STATE_HOME="$T/nstate" CLAUDE_CODE_SESSION_ID=sid-n "$@" bash "$NHOOK"
+}
+title_of() { sed -n 's/.*"sessionTitle":"\([^"]*\)".*/\1/p'; }
+tr_ai "$T/t1.jsonl" "Herdr sounds configuration"
+out=$(name_run "$T/n1" UserPromptSubmit "$T/t1.jsonl" "$T/repos/my-cool-repo" | title_of)
+expect "unnamed session gets <abbr>-<slug> as its title" [ "$out" = mcr-herdr-sounds-configuration ]
+expect "...and the same name in Herdr" bash -c '[ "$(call "$1" agent rename | tr "\n" " ")" = "w0:p1 mcr-herdr-sounds-configuration " ]' _ "$T/n1"
+out=$(name_run "$T/n2" UserPromptSubmit "$T/t1.jsonl" "$T/repos/my-cool-repo" PATH="$T/lanebin:$T/bin:$PATH" | title_of)
+expect "a bound lane adds its slot" [ "$out" = mcr-b-herdr-sounds-configuration ]
+out=$(name_run "$T/n3" UserPromptSubmit "$T/t1.jsonl" "$T/repos/homedevices" | title_of)
+expect "a one-word repo keeps its name; long names cut at a word" [ "$out" = homedevices-herdr-sounds ]
+tr_ai "$T/t2.jsonl" "Fix the IGA shopping-list sync for Basil Dragon orchestrator lanes"
+out=$(name_run "$T/n4" UserPromptSubmit "$T/t2.jsonl" "$T/repos/my-cool-repo" | title_of)
+expect "slug drops stopwords and keeps three words" [ "$out" = mcr-fix-iga-shopping ]
+tr_ai "$T/t3.jsonl" "Supercalifragilistic expialidocious extraordinarily"
+out=$(name_run "$T/n5" UserPromptSubmit "$T/t3.jsonl" "$T/repos/my-cool-repo" | title_of)
+expect "name fits Herdr's 32 characters" bash -c '[ ${#1} -le 32 ] && [ "${1%-}" = "$1" ]' _ "$out"
+out=$(name_run "$T/n6" UserPromptSubmit "$T/t1.jsonl" "$T/repos/my-cool-repo" FAKE_RENAME_TAKEN=mcr-herdr-sounds-configuration | title_of)
+expect "a name taken in Herdr gets -2, used for the title too" [ "$out" = mcr-herdr-sounds-configuration-2 ]
+tr_custom "$T/t4.jsonl" "LaneC"
+out=$(name_run "$T/n7" UserPromptSubmit "$T/t4.jsonl" "$T/repos/my-cool-repo")
+expect "an explicit name is kept (no title output)" [ -z "$out" ]
+expect "...and Herdr follows it" bash -c '[ "$(call "$1" agent rename | tr "\n" " ")" = "w0:p1 lanec " ]' _ "$T/n7"
+name_run "$T/n8" Stop "$T/t4.jsonl" "$T/repos/my-cool-repo" >/dev/null
+expect "a synced name is cached: no herdr calls on the next Stop" bash -c '! [ -s "$1" ]' _ "$T/n8"
+name_run "$T/n9" SessionStart "$T/t4.jsonl" "$T/repos/my-cool-repo" >/dev/null
+expect "SessionStart re-checks Herdr despite the cache" bash -c 'grep -qx rename "$1"' _ "$T/n9"
+mkdir -p "$T/nstate/herdr-spawn/orchestrators"; : > "$T/nstate/herdr-spawn/orchestrators/sid-n"
+out=$(name_run "$T/n10" UserPromptSubmit "$T/t1.jsonl" "$T/repos/my-cool-repo")
+expect "a session with children is never renamed" bash -c '[ -z "$1" ] && ! [ -s "$2" ]' _ "$out" "$T/n10"
+rm -f "$T/nstate/herdr-spawn/orchestrators/sid-n"
+out=$(name_run "$T/n11" Stop "$T/t1.jsonl" "$T/repos/my-cool-repo")
+expect "Stop never sets a title" bash -c '[ -z "$1" ] && ! [ -s "$2" ]' _ "$out" "$T/n11"
+printf '{"type":"user"}\n' > "$T/t5.jsonl"
+out=$(name_run "$T/n12" UserPromptSubmit "$T/t5.jsonl" "$T/repos/my-cool-repo")
+expect "no AI title yet, nothing happens" bash -c '[ -z "$1" ] && ! [ -s "$2" ]' _ "$out" "$T/n12"
+out=$(name_run "$T/n13" UserPromptSubmit "$T/t1.jsonl" "$T/repos/my-cool-repo" HERDR_ENV=); rc=$?
+expect "outside Herdr: silent, exit 0" bash -c '[ -z "$1" ] && [ "$2" = 0 ] && ! [ -s "$3" ]' _ "$out" "$rc" "$T/n13"
+out=$(name_run "$T/n14" UserPromptSubmit "$T/t1.jsonl" "$T/repos/my-cool-repo" FAKE_RENAME_FAIL=1); rc=$?
+expect "Herdr refusing every name: no title, exit 0" bash -c '[ -z "$1" ] && [ "$2" = 0 ]' _ "$out" "$rc"
 
 for f in "$ROOT"/hooks/*.sh "$ROOT"/scripts/*.sh; do
   bash -n "$f" && echo "ok   syntax $(basename "$f")" || { echo "FAIL syntax $f"; fail=1; }

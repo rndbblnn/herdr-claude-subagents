@@ -74,3 +74,18 @@
   only per agent *kind* (`[ui.sound.agents] claude = "off"`), which would silence parents too.
   Herdr 0.9.5 has no per-pane mute, and sound events are not logged, so none of this can be
   checked except by ear.
+- **Session names (2026-10-25).** `hooks/session-name.sh` (in hooks.json: SessionStart,
+  UserPromptSubmit, Stop) names unnamed sessions `<repo abbr>[-<lane>]-<slug of the AI title>`.
+  Probed live with claude 2.1.310: a hook's `sessionTitle` is stored as both `customTitle` and
+  `agentName`, so **it renames the peer name** (SendMessage address), and a custom title stops
+  AI retitling for good. Only SessionStart/UserPromptSubmit may set it; the AI title exists
+  after turn 1, so naming happens at prompt 2, once. "Has a name" = the transcript has a
+  `customTitle` (unnamed sessions have none); then Herdr follows Claude, never the reverse.
+  The spawner writes `herdr-spawn/orchestrators/$CLAUDE_CODE_SESSION_ID` and the hook won't
+  rename such a session, or its children would lose their return address. The Herdr name is
+  claimed first (unique, max 32) so the title uses exactly what Herdr accepted.
+  Sidebar label: the hook reports `--display-agent` under source `herdr-spawn` only for
+  unspawned panes, because a report replaces a child's `$nested`/`$under` tokens.
+- **`herdr agent prompt` into a lane-b session typed without submitting** (2026-10-25, twice in
+  a row; the next Enter sent both lines as one prompt). Not seen elsewhere; if a live test
+  stalls, `herdr pane read` before assuming the hook failed.

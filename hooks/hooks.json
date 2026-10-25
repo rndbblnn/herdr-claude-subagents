@@ -1,5 +1,5 @@
 {
-  "description": "Inside Herdr, redirect Agent calls that can write or run long to herdr-spawn.sh",
+  "description": "Inside Herdr, redirect Agent calls that can write or run long to herdr-spawn.sh, and keep each session's Claude and Herdr names in agreement",
   "hooks": {
     "PreToolUse": [
       {
@@ -11,6 +11,27 @@
             "timeout": 15,
             "statusMessage": "Routing delegated work to Herdr"
           }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-name.sh\"", "timeout": 20 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-name.sh\"", "timeout": 20 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-name.sh\"", "timeout": 20 }
         ]
       }
     ]

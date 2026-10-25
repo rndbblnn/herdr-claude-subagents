@@ -746,6 +746,13 @@ if [ -n "$orchestrator" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
   tag_pane "$HERDR_PANE_ID" --display-agent "$orchestrator"
   name_orchestrator_pane "$HERDR_PANE_ID" "$orchestrator"
 fi
+# Children address the orchestrator by its current peer name, so hooks/session-name.sh must
+# not rename it from here on. The marker is how it knows.
+if [ -n "$orchestrator" ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && [ "$dry_run" != yes ]; then
+  marker="${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn/orchestrators/$CLAUDE_CODE_SESSION_ID"
+  { mkdir -p -- "${marker%/*}" && : > "$marker"; } 2>/dev/null \
+    || printf '%s: warning: could not write %s; the session-name hook may rename you\n' "$SELF" "$marker" >&2
+fi
 
 if [ -n "$prompt" ]; then
   if [ "$wait_for_settle" = yes ]; then
