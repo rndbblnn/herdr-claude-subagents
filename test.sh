@@ -238,6 +238,12 @@ expect "Stop falls back to the transcript's last text" grep -qx "FINAL: from tra
 rm -f "$RF"
 hook_run "$T/r5" '{"session_id":"s-4","hook_event_name":"Stop","last_assistant_message":"Waiting for your answer."}'
 expect "Stop without FINAL writes nothing" test ! -e "$RF"
+hook_run "$T/r5b" '{"session_id":"s-5","hook_event_name":"Stop","last_assistant_message":"Left README alone.\n- reason one\nFINAL: no README change needed"}'
+expect "a FINAL line after a summary is a report, summary included" \
+  bash -c 'grep -qx "Left README alone." "$1" && grep -qx "FINAL: no README change needed" "$1"' _ "$RF"
+rm -f "$RF"
+hook_run "$T/r5c" '{"session_id":"s-6","hook_event_name":"Stop","last_assistant_message":"I will write FINAL: later, once done."}'
+expect "FINAL: mid-line is not a report" test ! -e "$RF"
 expect "hook without CC_TEAM_REPORT_FILE exits 0" \
   bash -c 'printf "{\"hook_event_name\":\"Stop\"}" | env -u CC_TEAM_REPORT_FILE bash "$1"' _ "$RHOOK"
 expect "hook with an unwritable report path exits 0" \

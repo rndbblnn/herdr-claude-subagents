@@ -1,6 +1,6 @@
 {
   "name": "herdr-claude-subagents",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Run Claude Code's delegated agents as real, named sessions in Herdr panes, so they show up in Herdr's agent list and can be watched, prompted and interrupted. Plugin packaging of assafcaf/herdr-claude-setup.",
   "author": {
     "name": "rndbblnn",

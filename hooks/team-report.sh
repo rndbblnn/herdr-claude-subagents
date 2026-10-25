@@ -10,7 +10,7 @@
 # Not registered in hooks.json. herdr-spawn.sh injects it into each child with
 # `claude --settings`, for two events:
 #   PostToolUse(SendMessage)  tool_input.message starts with "FINAL:"   (the normal path)
-#   Stop                      the last assistant text starts with "FINAL:" (no SendMessage)
+#   Stop                      the last assistant text has a line starting "FINAL:" (no SendMessage)
 # and points it at the file through CC_TEAM_REPORT_FILE. Without that variable it does nothing.
 #
 # Fail open, always: a Stop hook that exits 2 keeps the session running, so every path ends
@@ -55,8 +55,11 @@ main() {
     text=""
   fi
 
+  # A report is a message with a line that starts with "FINAL:", first or not: children often
+  # summarise first and put the FINAL line last (observed 2026-10-25, readme-writer). The whole
+  # message is saved, since the summary above that line is the useful part.
   case "${text#"${text%%[![:space:]]*}"}" in
-    FINAL:*) write_report "$file" "$session" "$source" "$text" && notify "$file" ;;
+    FINAL:*|*$'\n'FINAL:*) write_report "$file" "$session" "$source" "$text" && notify "$file" ;;
   esac
 
   [ "$event" = Stop ] && [ "${CC_TEAM_ONESHOT:-}" = 1 ] && close_self_if_reported "$file" "$session"
