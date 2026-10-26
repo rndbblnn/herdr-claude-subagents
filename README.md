@@ -143,6 +143,7 @@ Set these as env vars, for example in `settings.json` → `env`:
 |---|---|
 | `CC_HERDR_ALLOWED_AGENTS=bulk-reader,my-auditor` | More agent types that may stay in-process. List your own read-only agents here. |
 | `CC_ALLOW_INPROCESS_AGENTS=1` | Turns the redirect off for one session. |
+| `CC_TEAM_STOP_EMULATORS=0` | Leaves a child's Android emulators running when `--close`, `--reap` or `--oneshot` tears down its pane. |
 
 ### 🌳 Show the hierarchy in Herdr's agent panel
 
@@ -213,6 +214,12 @@ It asks its parent. The spawner tells every child to send task questions to the 
 <summary><b>How do finished children leave the agent panel?</b></summary>
 <br/>
 The child ends with a report that has a line starting <code>FINAL:</code> (first or after a summary; mid-sentence doesn't count), and a hook saves the whole message to <code>~/.local/state/herdr-spawn/&lt;task&gt;/&lt;name&gt;.md</code>. The parent then runs <code>herdr-spawn.sh --reap &lt;task&gt;</code>, which closes every pane of that task whose agent is idle or done <i>and</i> has a saved report from its own session, and prints what it closed and skipped and why. Spawn with <code>--oneshot</code> and the child closes itself once its report is saved. Closing a pane removes its row, and the tab goes with its last pane. None of this keys on Herdr's <code>done</code> status, because that fires after every turn, including when a child is waiting for your answer.
+</details>
+
+<details>
+<summary><b>An Android emulator kept running after the child that started it was gone</b></summary>
+<br/>
+An emulator launched from a child's shell is reparented to init and outlives the pane: one left behind ran for ~44 hours holding ~3 GB of RAM and swap. Now <code>--close</code>, <code>--reap</code> and <code>--oneshot</code> send SIGTERM to every emulator whose environment carries the child's <code>CLAUDE_CODE_SESSION_ID</code>, and <code>--close</code> reports the count as <code>"emulators_stopped"</code>. <b>To keep one alive</b>, start it with <code>CC_TEAM_KEEP_EMULATOR=1</code> (or <code>LANE</code> set); <code>CC_TEAM_STOP_EMULATORS=0</code> turns this off. Linux only, since it reads <code>/proc</code>.
 </details>
 
 <details>
