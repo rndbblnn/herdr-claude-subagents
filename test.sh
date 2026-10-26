@@ -400,6 +400,33 @@ start=$(date +%s%N); env PATH="$RG/bin:$PATH" FAKE_RUN=/dev/null README_AGENT_SP
   bash -c 'git -C "$1" commit -q --allow-empty -m "feat: slow agent" | cat' _ "$RG/repo" 2>/dev/null
 expect "the commit returns at once even when piped (no held stdio)" bash -c '[ $(( ($(date +%s%N) - $1) / 1000000 )) -lt 3000 ]' _ "$start"
 
+# stop-emulators.sh: a fake /proc with emulators of several owners; only the child's go.
+EP="$T/proc"; mkdir -p "$EP"
+fakeproc() { # <pid> <argv, space-separated> <env lines...>
+  local pid="$1" argv="$2"; shift 2; mkdir -p "$EP/$pid"
+  printf '%s\0' $argv > "$EP/$pid/cmdline"; printf '%s\0' "$@" > "$EP/$pid/environ"
+}
+fakeproc 101 "/sdk/emulator/qemu/linux-x86_64/qemu-system-x86_64-headless -avd basil-test -no-window" CLAUDE_CODE_SESSION_ID=s-emu
+fakeproc 102 "/sdk/emulator/qemu/linux-x86_64/qemu-system-x86_64 -avd basil-lane-a" CLAUDE_CODE_SESSION_ID=s-emu LANE=A
+fakeproc 103 "/sdk/emulator/qemu/linux-x86_64/qemu-system-x86_64 -avd other" CLAUDE_CODE_SESSION_ID=s-else
+fakeproc 104 "/usr/bin/node server.js" CLAUDE_CODE_SESSION_ID=s-emu
+fakeproc 105 "/sdk/emulator/emulator -avd kept" CLAUDE_CODE_SESSION_ID=s-emu CC_TEAM_KEEP_EMULATOR=1
+emu() { # <log> <session> [dry] [env...] — runs the lib with a kill that only logs
+  local log="$1" s="$2" dry="$3"; shift 3
+  env CC_TEAM_PROC="$EP" CC_TEAM_KILL="$T/bin/fakekill" FAKE_KILLS="$log.kills" "$@" \
+    bash -c '. "$1"; stop_session_emulators "$2" "$3"' _ "$ROOT/hooks/stop-emulators.sh" "$s" "$dry" > "$log"
+}
+printf '#!/usr/bin/env bash\necho "$2" >> "$FAKE_KILLS"\n' > "$T/bin/fakekill"; chmod +x "$T/bin/fakekill"
+emu "$T/em1" s-emu ""
+expect "emulators: stops only the child's own, unlaned, unkept emulator" \
+  bash -c '[ "$(cat "$1.kills")" = 101 ] && grep -qx "stopped emulator 101 basil-test" "$1"' _ "$T/em1"
+emu "$T/em2" s-emu yes
+expect "emulators: dry run stops nothing" bash -c 'test ! -e "$1.kills" && grep -qx "would stop emulator 101 basil-test" "$1"' _ "$T/em2"
+emu "$T/em3" s-emu "" CC_TEAM_STOP_EMULATORS=0
+expect "emulators: CC_TEAM_STOP_EMULATORS=0 opts out" bash -c 'test ! -e "$1.kills" && test ! -s "$1"' _ "$T/em3"
+emu "$T/em4" "" ""
+expect "emulators: no session, no stop" test ! -e "$T/em4.kills"
+
 for f in "$ROOT"/hooks/*.sh "$ROOT"/scripts/*.sh "$ROOT"/.githooks/*; do
   bash -n "$f" && echo "ok   syntax $(basename "$f")" || { echo "FAIL syntax $f"; fail=1; }
 done

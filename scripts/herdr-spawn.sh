@@ -30,6 +30,8 @@
 #   herdr-spawn.sh <name> --task <slug> [options] [-- <claude args...>]
 #   herdr-spawn.sh <name> --close     close a finished agent's pane (and its tab, if it was
 #                                     the last pane); its sidebar row goes with it
+#                                     (--close and --reap also stop the Android emulators the
+#                                     child started; see hooks/stop-emulators.sh)
 #   herdr-spawn.sh --reap <task>      close every pane of that task whose agent is idle/done
 #                                     AND has a saved FINAL report; print closed and skipped
 #
@@ -71,6 +73,8 @@ LIB="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../hooks" && pwd)/json-field.sh"
 [ -r "$LIB" ] || die "cannot read $LIB"
 # shellcheck source=../hooks/json-field.sh
 . "$LIB"
+# shellcheck source=../hooks/stop-emulators.sh
+. "${LIB%/*}/stop-emulators.sh" || die "cannot read ${LIB%/*}/stop-emulators.sh"
 
 # Numbers, which json_string_field cannot read: a pane rect is {"height":65,"width":121}.
 json_number_field() {
@@ -200,7 +204,11 @@ if [ "$close" = yes ]; then
   pane=$(printf '%s' "$info" | json_string_field pane_id)
   [ -n "$pane" ] || die "could not read the pane of '$name' from herdr agent get"
   why=$(close_pane "$pane") || die "refusing to close '$name': $why"
-  printf '{"agent":"%s","pane_id":"%s","closed":true}\n' "$name" "$pane"
+  session=$(printf '%s' "$info" | json_string_field value agent_session)
+  stopped=$(stop_session_emulators "$session" "${dry_run#no}")
+  [ -z "$stopped" ] || printf '%s\n' "$stopped" >&2
+  printf '{"agent":"%s","pane_id":"%s","closed":true,"emulators_stopped":%d}\n' "$name" "$pane" \
+    "$(printf '%s' "$stopped" | grep -c .)"
   exit 0
 fi
 
@@ -231,6 +239,7 @@ if [ "$reap" = yes ]; then
     fi
     if [ -z "$why" ] && why=$(close_pane "$pane"); then
       printf 'closed  %s %s (report: %s)\n' "$pane" "$name" "$file"; n_closed=$((n_closed + 1))
+      stop_session_emulators "$session" "${dry_run#no}" | sed 's/^/        /'
     else
       printf 'skipped %s %s (%s)\n' "$pane" "${name:--}" "$why"; n_skipped=$((n_skipped + 1))
     fi

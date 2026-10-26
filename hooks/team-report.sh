@@ -116,7 +116,11 @@ close_self_if_reported() { # <file> <session>
   [ -r "$1" ] && [ -n "${HERDR_PANE_ID:-}" ] || return 0
   grep -qx "session_id: $2" "$1" 2>/dev/null || return 0
   command -v herdr >/dev/null 2>&1 || return 0
-  local pane="$HERDR_PANE_ID"
+  local pane="$HERDR_PANE_ID" lib
+  # Emulators this child started outlive its pane (stop-emulators.sh says why).
+  lib="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/stop-emulators.sh"
+  # shellcheck source=stop-emulators.sh
+  if [ -r "$lib" ] && . "$lib"; then stop_session_emulators "$2" >/dev/null 2>&1; fi
   if command -v setsid >/dev/null 2>&1; then
     setsid sh -c 'sleep "$2"; herdr pane close "$1"' _ "$pane" "${CC_TEAM_ONESHOT_DELAY:-2}" </dev/null >/dev/null 2>&1 &
   else
