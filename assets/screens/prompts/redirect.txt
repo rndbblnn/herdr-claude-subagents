@@ -1,0 +1,14 @@
+Screenshot of a single Claude Code CLI session filling a dark terminal window titled "claude — my-app". No sidebar. Content, top to bottom, left-aligned with generous padding:
+1. A user prompt line: "> review, test and document the auth change" (prompt marker dim, text white).
+2. "● Agent(code-reviewer: Review the auth diff)" with "Agent" in bold white.
+3. Indented red text block:
+   "  ⎿ PreToolUse:Agent hook blocked: subagent_type 'code-reviewer' runs"
+   "    in-process, where Herdr cannot see it."
+   "    Spawn it into a pane instead — one tab per task, one pane per agent."
+4. "● Bash(herdr-spawn.sh reviewer --task review-auth --orchestrator my-app …)" in white.
+5. Indented dim output: "  ⎿ {\"agent\":\"reviewer\",\"task\":\"review-auth\",\"prompted\":true}"
+6. Same pair for tester: "● Bash(herdr-spawn.sh tester --task review-auth …)" and "  ⎿ {\"agent\":\"tester\",\"task\":\"review-auth\",\"prompted\":true}"
+7. A white line: "● Both agents are running in tab review-auth. I'll wait for their FINAL reports."
+8. At the bottom an input box with rounded gray border containing ">" and a cursor.
+The word "prompted\":true" segments highlighted in green.
+STYLE: a crisp, realistic straight-on screenshot of a dark terminal window (macOS-style window chrome with three dots, on a subtle dark purple-to-navy gradient backdrop with soft shadow). Monospace font everywhere (JetBrains Mono), razor-sharp legible text, flat UI, no 3D, no perspective, no extra decorations, no watermark. Palette: background #0d1117, sidebar #0b0f14, text #e6edf3, dim gray #6e7681, blue #58a6ff, yellow #f0b72f, green #3fb950, red #f85149, Claude orange #d97757. Spell every piece of text EXACTLY as given, render nothing that is not listed. 16:9.

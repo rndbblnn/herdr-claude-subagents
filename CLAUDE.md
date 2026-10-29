@@ -104,3 +104,11 @@
   headless `claude -p` with a pid file. The hook backgrounds the agent with all stdio on a
   log file: a child holding git's stdout made a piped `git commit` wait for the whole run.
   Logs: `.git/readme-agent/run-*.log`; FINAL report: `~/.local/state/herdr-spawn/readme/`.
+- **README screenshots are Gemini mockups (2026-10-29).** `assets/screens/*.webp` were made with
+  `gemini-3-pro-image` from `assets/screens/prompts/*.txt` (`assets/screens/gen.py`, key from
+  `GOOGLE_GENERATIVE_AI_API_KEY`; on this machine it lives in basildragon's `terraform.tfvars`).
+  It spells text well when every string is quoted in the prompt and "render nothing that is not
+  listed" is said; it still invents layout (a duplicated pane, a toast over text), so check each
+  image and re-run with the fix spelled out. Prompts use real output (the hook's refusal, the
+  spawner's JSON, `--reap`'s JSON) and the real `$nested` sidebar shape: workspace on line 1, the
+  child's name indented under it. Alt text says "Mockup".

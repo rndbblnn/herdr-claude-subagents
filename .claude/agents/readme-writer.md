@@ -40,7 +40,7 @@ The current README already has the voice: keep it and extend it, don't restart i
 engineers star a repo, and what you must preserve:
 
 - **The first screen sells it.** Centered hero: name, a one-line promise, a bold two-line
-  pitch, badges, `assets/hero.svg`, the anchor nav. Change the promise only if the product's
+  pitch, badges, `assets/screens/hero.webp` (mockups; prompts in `assets/screens/prompts/`), the anchor nav. Change the promise only if the product's
   scope really changed.
 - **Pain before features.** "😩 The problem" then "✨ The fix" with a before/after. New
   features earn a line here only if they change the story.

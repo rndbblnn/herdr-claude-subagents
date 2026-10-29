@@ -14,7 +14,7 @@
 
 <br/>
 
-<img src="assets/hero.svg" alt="Illustration: Claude Code subagents listed as named, live sessions in Herdr's agent panel" width="100%"/>
+<img src="assets/screens/hero.webp" alt="Mockup: Herdr with a review-auth tab of three spawned Claude sessions (reviewer working, tester blocked on a prompt, docs done) nested under their parent in the agent panel" width="100%"/>
 
 <br/>
 
@@ -81,6 +81,10 @@ Restart Claude Code. **That's it.** Next time Claude reaches for a subagent insi
 
 ## 🧠 How it works
 
+You ask for a team. The hook stops the invisible subagent, and Claude spawns named panes instead:
+
+<img src="assets/screens/redirect.webp" alt="Mockup: a Claude Code session whose Agent call is blocked by the PreToolUse hook, followed by two herdr-spawn.sh calls that each return prompted:true" width="100%"/>
+
 ```mermaid
 flowchart LR
     A["🧑‍💻 You → Claude<br/>'review, test & document this'"] --> B{"Agent tool call"}
@@ -130,6 +134,10 @@ bash "$CLAUDE_PLUGIN_ROOT/scripts/herdr-spawn.sh" --reap review-auth # close eve
 bash "$CLAUDE_PLUGIN_ROOT/scripts/herdr-spawn.sh" reviewer --close   # or one, by hand
 ```
 
+Every child's FINAL report lands in a file, with a ✓ on its row and a notification, so `--reap` knows which panes are safe to close:
+
+<img src="assets/screens/report.webp" alt="Mockup: a saved FINAL report from reviewer, the FINAL from reviewer notification, ✓ on both children in the agent panel, and --reap closing two panes" width="100%"/>
+
 > [!NOTE]
 > Add `--dry-run` to print the herdr commands without running anything.
 
@@ -168,6 +176,8 @@ claude = [
 ### 🏷️ One name per session
 
 Without help, a session you start yourself has three names: Claude's AI title in the app's session list, a folder-based peer name for `SendMessage`, and nothing in Herdr. The plugin's `session-name.sh` hook gives it one name, used in all three places plus the sidebar label:
+
+<img src="assets/screens/names.webp" alt="Mockup: before, sessions titled in prose and every Herdr agent called claude; after, each session has one name such as bo-b-flaky-checkout-test in both lists" width="100%"/>
 
 ```text
 <repo abbr>[-<lane>]-<slug>     bo-b-weekly-grocery-shopping

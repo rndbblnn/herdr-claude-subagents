@@ -1,0 +1,14 @@
+Screenshot of the terminal multiplexer Herdr, window title "herdr — review-auth".
+The Herdr sidebar is a narrow left column (22% width) with a thin vertical divider. Agent rows have NO status words and NO colored badges: just a small colored dot and the text.
+Sidebar top: dim header "spaces", then "● my-app" and below it dim "main".
+Sidebar bottom: dim header "agents" with dim "grouped" right-aligned, then exactly these rows:
+  "● my-app"  (blue dot, bold white — the orchestrator, one line only)
+  "● my-app"  (blue dot) and on the next line, indented 6 spaces, "reviewer"
+  "● my-app"  (yellow dot) and on the next line, indented, "tester"
+  "● my-app"  (green dot) and on the next line, indented, "docs  ✓"
+Right of the sidebar, a tab bar: "1" (dim), "review-auth" (white text on a soft blue block), "+".
+Below the tab bar EXACTLY THREE panes side by side in ONE row, equal width, full height, separated by thin gray vertical lines. No other panes.
+Pane 1 title "reviewer": lines "● Read(src/auth/session.ts)", "● Grep(\"refreshToken\")", "  ⎿ Found 3 call sites", then an orange line "✻ Reviewing… (42s)".
+Pane 2 title "tester": lines "● Bash(npm test -- auth)", "  ⎿ 38 passed, 1 failed", then a yellow-bordered box: "Do you want to proceed?" / "❯ 1. Yes" / "  2. No".
+Pane 3 title "docs": lines "● Edit(docs/auth.md)", "● SendMessage(to: \"my-app\")", then a green line "FINAL: docs/auth.md covers token refresh".
+STYLE: a crisp, realistic straight-on screenshot of a dark terminal window (macOS-style window chrome with three dots, on a subtle dark purple-to-navy gradient backdrop with soft shadow). Monospace font everywhere (JetBrains Mono), razor-sharp legible text, flat UI, no 3D, no perspective, no extra decorations, no watermark. Palette: background #0d1117, sidebar #0b0f14, text #e6edf3, dim gray #6e7681, blue #58a6ff, yellow #f0b72f, green #3fb950, red #f85149, Claude orange #d97757. Spell every piece of text EXACTLY as given, render nothing that is not listed. 16:9.
